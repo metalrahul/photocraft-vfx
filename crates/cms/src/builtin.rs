@@ -28,6 +28,8 @@ pub enum Builtin {
     LinearSrgb,
     /// ACEScg: AP1 primaries, the ACES white point (~D60), linear transfer. The ACES working space for CG renders.
     AcesCg,
+    /// ACES2065-1: AP0 primaries, D60 white point, linear transfer. The ACES archival/exchange space.
+    Aces2065_1,
     /// Rec. 2020 primaries, D65, Rec. 709 transfer function.
     Rec2020,
     /// Gray, gamma 2.2.
@@ -45,13 +47,14 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 12] = [
+    pub const ALL: [Builtin; 13] = [
         Builtin::Srgb,
         Builtin::DisplayP3,
         Builtin::AdobeRgbCompat,
         Builtin::ProPhotoCompat,
         Builtin::LinearSrgb,
         Builtin::AcesCg,
+        Builtin::Aces2065_1,
         Builtin::Rec2020,
         Builtin::GrayGamma22,
         Builtin::SGray,
@@ -69,6 +72,7 @@ impl Builtin {
             Builtin::ProPhotoCompat => "prophoto-compat",
             Builtin::LinearSrgb => "linear-srgb",
             Builtin::AcesCg => "aces-cg",
+            Builtin::Aces2065_1 => "aces-2065-1",
             Builtin::Rec2020 => "rec2020",
             Builtin::GrayGamma22 => "gray-gamma-2.2",
             Builtin::SGray => "sgray",
@@ -87,6 +91,7 @@ impl Builtin {
             Builtin::ProPhotoCompat => "ProPhoto RGB-compatible (ROMM primaries, PhotoCraft)",
             Builtin::LinearSrgb => "Linear sRGB (PhotoCraft)",
             Builtin::AcesCg => "ACEScg (AP1, linear, PhotoCraft)",
+            Builtin::Aces2065_1 => "ACES2065-1 (AP0, linear, PhotoCraft)",
             Builtin::Rec2020 => "Rec. ITU-R BT.2020 (PhotoCraft)",
             Builtin::GrayGamma22 => "Gray Gamma 2.2 (PhotoCraft)",
             Builtin::SGray => "sGray (sRGB tone curve, PhotoCraft)",
@@ -110,6 +115,7 @@ impl Builtin {
             "sgray" | "graysrgb" => Some(Builtin::SGray),
             "dotgain20" | "dotgain20compat" | "dotgain" => Some(Builtin::DotGain20Compat),
             "aces-cg" | "acescg" => Some(Builtin::AcesCg),
+            "aces-2065-1" | "aces20651" | "ap0" => Some(Builtin::Aces2065_1),
             "lab" | "labd50" | "cielab" => Some(Builtin::LabD50),
             "cmyk" | "coatedcmyk" | "defaultcmyk" | "photocraftcoatedcmyk" => Some(Builtin::CoatedCmyk),
             _ => None,
@@ -119,7 +125,7 @@ impl Builtin {
 
     /// The profile (built once per process).
     pub fn profile(self) -> &'static Profile {
-        static CELLS: [OnceLock<Profile>; 12] = [const { OnceLock::new() }; 12];
+        static CELLS: [OnceLock<Profile>; 13] = [const { OnceLock::new() }; 13];
         // `ALL` lists the variants in declaration order (checked by `all_in_declaration_order`),
         // so the discriminant is the cell index.
         CELLS[self as usize].get_or_init(|| build(self))
@@ -309,13 +315,14 @@ pub fn cicp_rgb(primaries: u16, transfer: u16, linear: bool) -> Option<Profile> 
 }
 
 fn build(b: Builtin) -> Profile {
-    let (srgb_p, p3, adobe, romm, bt2020, ap1) = (
+    let (srgb_p, p3, adobe, romm, bt2020, ap1, ap0) = (
         BT709,
         P3,
         [[0.64, 0.33], [0.21, 0.71], [0.15, 0.06]],
         [[0.7347, 0.2653], [0.1596, 0.8404], [0.0366, 0.0001]],
         BT2020,
         [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044]],
+        [[0.7347, 0.2653], [0.0000, 1.0000], [0.0001, -0.0770]],
     );
     match b {
         Builtin::Srgb => rgb(b.description(), srgb_p, d65(), srgb_trc()),
@@ -326,6 +333,7 @@ fn build(b: Builtin) -> Profile {
         // ACEScg is scene-linear on the AP1 primaries with the ACES white point (~D60,
         // xy 0.32168/0.33767, the ACES 2065-1 neutral).
         Builtin::AcesCg => rgb(b.description(), ap1, math::xy_to_xyz([0.32168, 0.33767]), Curve::Gamma(1.0)),
+        Builtin::Aces2065_1 => rgb(b.description(), ap0, math::xy_to_xyz([0.32168, 0.33767]), Curve::Gamma(1.0)),
         Builtin::Rec2020 => rgb(b.description(), bt2020, d65(), rec709_trc()),
         Builtin::GrayGamma22 => gray(b.description(), Curve::Gamma(2.2)),
         Builtin::SGray => gray(b.description(), srgb_trc()),

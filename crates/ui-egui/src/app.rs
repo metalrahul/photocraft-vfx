@@ -31,6 +31,19 @@ pub(crate) use targets::adjustment_layer_active;
 pub(crate) use thumbs::layer_thumb_frame;
 pub use thumbs::surface_fingerprint;
 
+#[derive(Clone, Debug)]
+pub struct AppViewerState {
+    pub controls: photocraft_engine::display_color::ViewerControls,
+}
+
+impl Default for AppViewerState {
+    fn default() -> Self {
+        Self {
+            controls: photocraft_engine::display_color::ViewerControls::default(),
+        }
+    }
+}
+
 impl PhotocraftApp {
     pub fn new(mut session: Session, mut services: Services) -> Self {
         session.updates.check = services.check_updates.take();
@@ -199,6 +212,7 @@ impl PhotocraftApp {
             min_frame_ms: None,
             last_frame_start_ms: 0.0,
             jobs: Default::default(),
+            viewer_state: AppViewerState::default(),
             #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
             live_tokens: theme::live::LiveTokens::from_env(),
         };
