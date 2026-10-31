@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-rfd = "0.14"
+rfd = "0.17"
 craft-print = { workspace = true }
 craft-ui = { workspace = true }
 photocraft-geom = { workspace = true }
