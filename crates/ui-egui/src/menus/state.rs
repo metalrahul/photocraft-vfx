@@ -50,6 +50,7 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
         return e;
     }
     match id {
+		"file.export.exrAces" => app.session.active().is_some(),
         "window.panel.activate" | "window.panel.layout" | "ui.dock" => true,
         "window.panel.group"
         | "window.panel.move"

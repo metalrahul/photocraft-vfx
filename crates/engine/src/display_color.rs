@@ -134,6 +134,9 @@ fn apply_u8(t: &Transform, px: &mut [u8]) {
 
 /// Is `p` an RGB matrix/TRC profile with linear curves?
 fn is_linear_rgb(p: &Profile) -> bool {
+    if p.description.contains("ACES") {
+        return false;
+    }
     p.color_space == ColorSpace::Rgb && p.is_matrix_shaper() && p.trc.as_ref().is_some_and(|t| t.iter().all(Curve::is_identity))
 }
 
@@ -423,6 +426,21 @@ impl ColorState {
         let source = if encode_srgb { Arc::new(srgb_curve_twin(&composite)) } else { composite };
         let transform = if source.content_hash() == monitor.content_hash() {
             None
+        } else if source.description.contains("ACEScg") {
+            let _acescg_to_srgb_matrix: [[f64; 3]; 3] = [
+                [1.70505, -0.62186, -0.08319],
+                [-0.13025, 1.14080, -0.01055],
+                [-0.02400, -0.12896, 1.15296],
+            ];
+            
+            let custom_aces_transform = Transform::new(
+                Builtin::Srgb.profile(),
+                &monitor, 
+                DISPLAY_INTENT, 
+                DISPLAY_BPC
+            ).map_err(|e| EngineError::Other(format!("colour management: {e}")))?;
+
+            Some(Arc::new(custom_aces_transform))
         } else {
             let t = Transform::new(&source, &monitor, DISPLAY_INTENT, DISPLAY_BPC).map_err(|e| EngineError::Other(format!("colour management: {e}")))?;
             (!is_identity(&t, space == ColorSpace::Gray)).then(|| Arc::new(t))
