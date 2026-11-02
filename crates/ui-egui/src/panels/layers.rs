@@ -26,10 +26,11 @@ pub(super) fn simple_lock_toggle(background: bool, l: &Layer, targets: &Value) -
     ("layer.setProps".into(), p)
 }
 
-/// The Layers panel's blend modes: Photoshop's, plus the layer's own Paint.NET mode when it has one
-/// (an imported `.pdn`), so the menu matches Photoshop's for every other layer.
+/// The Layers panel's blend modes: the menu's Nuke Merge colour operations, plus the layer's own
+/// mode when it is a hidden one ([`BlendMode::HIDDEN_MODES`], e.g. from a script or older file),
+/// so the dropdown can still show it.
 pub(crate) fn blend_options(groups: bool, current: BlendMode) -> Vec<(BlendMode, &'static str)> {
-    let own = Some(current).filter(|m| !m.has_psd_equivalent());
+    let own = Some(current).filter(|m| *m != BlendMode::PassThrough && !m.is_menu_mode());
     std::iter::once(BlendMode::PassThrough).filter(|_| groups).chain(BlendMode::LAYER_MODES).chain(own).map(|m| (m, m.label())).collect()
 }
 
