@@ -17,7 +17,7 @@ heif = ["photocraft-codecs/heif"]
 
 [dependencies]
 exr = "1.74"
-rfd = "0.15"
+rfd = "0.17"
 photocraft-geom = { workspace = true }
 photocraft-color = { workspace = true }
 photocraft-cms = { workspace = true }
@@ -40,12 +40,12 @@ blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 flate2 = { workspace = true }
 roxmltree = "0.21"
 # Reuse usvg's locked header reader to bound embedded SVG raster data before decoding.
-imagesize = "0.13"
+imagesize = "0.15"
 # SVG import (svg.rs): usvg parses, resvg rasterises what the shape model can't hold. Both are
 # already in the tree through the UI's icon loader; text shaping needs the fonts feature set.
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
+resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 resvg = { version = "0.45", default-features = false, features = ["text", "raster-images"] }
