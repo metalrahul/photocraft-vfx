@@ -110,9 +110,11 @@ pub(crate) fn prepare_opened(s: &Session, name: &str, doc: &mut Document) {
 /// CMS converts them from the document's profile to ACEScg in one step: the tone curve is
 /// decoded to linear light, sRGB/Rec.709 primaries become AP1 and the D65 white is adapted to
 /// the ACES white (Bradford, relative colorimetric, no black point compensation, as OCIO's ACES
-/// configs do). 32-bit linear files (EXR/HDR) are converted from their linear profile, so
-/// nothing is decoded twice. Grayscale opens as RGB; CMYK, Lab, Indexed, Bitmap and Duotone
-/// documents are left as they are. A conversion error leaves the document unconverted.
+/// configs do). 32-bit linear RGB files (EXR/HDR) are converted with the exact linear matrix
+/// between the two profiles ([`linear_to_aces_cg`]) instead of the CMS, whose float transforms
+/// clamp to 0..1: highlights above 1 survive, as in Nuke. Grayscale opens as RGB; CMYK, Lab,
+/// Indexed, Bitmap and Duotone documents are left as they are. A conversion error leaves the
+/// document unconverted.
 pub(crate) fn convert_opened_to_aces_cg(s: &Session, doc: &mut Document) {
     use photocraft_color::{ColorMode, SampleType};
     if !s.prefs.get().file_handling.open_images_as_aces_cg || !matches!(doc.mode, ColorMode::Rgb | ColorMode::Grayscale) {
@@ -125,6 +127,9 @@ pub(crate) fn convert_opened_to_aces_cg(s: &Session, doc: &mut Document) {
     if already {
         return;
     }
+    if linear_to_aces_cg(doc) {
+        return;
+    }
     let mut converted = doc.clone();
     if converted.depth != SampleType::F32 {
         crate::image_cmds::change_depth_keep_values(&mut converted, SampleType::F32);
@@ -132,6 +137,32 @@ pub(crate) fn convert_opened_to_aces_cg(s: &Session, doc: &mut Document) {
     if crate::color_cmds::convert_document(&mut converted, aces, photocraft_cms::Intent::RelativeColorimetric, false).is_ok() {
         *doc = converted;
     }
+}
+
+/// A 32-bit RGB document in a linear matrix/TRC profile (an EXR's linear sRGB, linear Rec.2020,
+/// …) moved to ACEScg without the CMS: `rgb_aces = M_aces⁻¹ · M_src · rgb`, both colourant
+/// matrices adapted to the D50 PCS, which is the relative colorimetric matrix/shaper transform
+/// minus its 0..1 clamp. Pixel layers only (an opened EXR has nothing else); masks and alpha are
+/// untouched. Returns false (nothing changed) for any other document.
+fn linear_to_aces_cg(doc: &mut Document) -> bool {
+    use photocraft_cms::math::{apply, invert, mul};
+    use photocraft_color::{ColorMode, SampleType};
+    if doc.depth != SampleType::F32 || doc.mode != ColorMode::Rgb {
+        return false;
+    }
+    let src = crate::color_cmds::document_profile(doc);
+    let aces = photocraft_cms::Builtin::AcesCg.profile();
+    let linear = src.is_matrix_shaper() && src.trc.as_ref().is_some_and(|t| t.iter().all(|c| c.is_identity()));
+    let (true, Some(ms), Some(ma)) = (linear, src.matrix, aces.matrix) else { return false };
+    let Some(ma_inv) = invert(&ma) else { return false };
+    let m = mul(&ma_inv, &ms);
+    crate::image_cmds::for_each_surface(&mut doc.layers, false, &mut |surf, is_mask| {
+        if !is_mask {
+            surf.map_rgb(|c| apply(&m, c.map(f64::from)).map(|v| v as f32));
+        }
+    });
+    doc.icc_profile = Some(aces.to_bytes());
+    true
 }
 
 /// Edit › Preferences › Raw Defaults › Resolution: the ppi a raw developed on open gets, as

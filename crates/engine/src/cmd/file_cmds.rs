@@ -504,4 +504,28 @@ mod aces_open_tests {
         assert_eq!(r["action"].as_str(), Some("kept"), "{r}");
         assert_eq!(s.active().unwrap().doc.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
     }
+
+    /// A linear-sRGB EXR keeps its highlights: values above 1 go through the exact matrix, not
+    /// the CMS (whose float transforms clamp to 0..1).
+    #[test]
+    fn open_images_as_aces_cg_keeps_exr_values_above_one() {
+        let px = [4.0f32, 2.0, 0.5];
+        let data: Vec<f32> = px.iter().copied().cycle().take(48).collect();
+        let image = photocraft_codecs::Image::from_f32(4, 4, photocraft_codecs::ChannelLayout::Rgb, &data).unwrap();
+        let bytes = photocraft_codecs::encode(&image, photocraft_codecs::Format::OpenExr, &photocraft_codecs::EncodeOptions::default()).unwrap();
+        let mut s = Session::new();
+        s.prefs.edit(|p| p.file_handling.open_images_as_aces_cg = true);
+        open_bytes_as(&mut s, "shot.exr", &bytes, None, None).unwrap();
+        let d = &s.active().unwrap().doc;
+        let aces = photocraft_cms::Builtin::AcesCg.profile().to_bytes();
+        assert_eq!(d.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
+        // Linear sRGB → ACEScg (Bradford): the standard matrix applied to (4, 2, 0.5).
+        let m = [[0.6131, 0.3395, 0.0474], [0.0702, 0.9164, 0.0134], [0.0206, 0.1096, 0.8698]];
+        let want: Vec<f32> = m.iter().map(|r| r[0] * px[0] + r[1] * px[1] + r[2] * px[2]).collect();
+        let got = first_pixel(d);
+        for (g, w) in got[..3].iter().zip(&want) {
+            assert!((g - w).abs() < 0.01, "{got:?} vs {want:?}");
+        }
+        assert!(got[0] > 3.0, "highlight clamped: {got:?}");
+    }
 }

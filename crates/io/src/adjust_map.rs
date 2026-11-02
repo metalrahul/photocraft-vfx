@@ -84,7 +84,7 @@ fn parse_curves(d: &[u8]) -> Option<Adjustment> {
     let mut it = curves.into_iter();
     let master = it.next()?;
     let (r, g, b, k) = (it.next()?, it.next()?, it.next()?, it.next()?);
-    Some(Adjustment::Curves { master, per_channel: [r, g, b], space: ToneSpace::Rgb, black: k, pencil })
+    Some(Adjustment::Curves { master, per_channel: [r, g, b], space: ToneSpace::Rgb, black: k, pencil, lookup: Default::default() })
 }
 
 fn desc_num(d: &Descriptor, key: &str) -> Option<f32> {
@@ -681,7 +681,7 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
         }
         Adjustment::Exposure { exposure, offset, gamma } => return block(b"expA", encode::exposure(*exposure, *offset, *gamma)),
         Adjustment::Levels { master, per_channel, space, black } => return block(b"levl", encode::levels(master, per_channel, *space, black)),
-        Adjustment::Curves { master, per_channel, space, black, pencil } => {
+        Adjustment::Curves { master, per_channel, space, black, pencil, .. } => {
             return block(b"curv", encode::curves(master, per_channel, *space, black, *pencil));
         }
         Adjustment::SelectiveColor { relative, adjustments } => return block(b"selc", encode::selective_color(*relative, adjustments)),
@@ -702,6 +702,9 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
         Adjustment::ChannelMixer { matrix, monochrome } => {
             return block(b"mixr", encode::channel_mixer(matrix, *monochrome));
         }
+        // Nuke's Grade has no Photoshop adjustment: nothing is written and PSD export warns
+        // (`.pcraft` and the EXR/Nuke script keep it).
+        Adjustment::Grade { .. } => {}
         Adjustment::Unsupported { psd_key, raw } => {
             let k = psd_key.as_bytes();
             if k.len() == 4 {

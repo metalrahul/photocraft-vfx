@@ -11,7 +11,7 @@
 
 use photocraft_color::ColorMode;
 use photocraft_doc::Adjustment;
-use photocraft_doc::adjust::{CURVE_MAP_LEN, CurvePoint, HueRange, LevelsChannel, ToneSpace, curve_map, curve_map_outputs};
+use photocraft_doc::adjust::{CURVE_MAP_LEN, CurveLookup, CurvePoint, HueRange, LevelsChannel, ToneSpace, curve_map, curve_map_outputs};
 use serde_json::{Map, Value, json};
 
 use crate::{EngineError, Result};
@@ -205,13 +205,61 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
         }
         "selectiveColor" => crate::adjust_cmds::selective_from_params(p, base.filter(|b| matches!(b, Adjustment::SelectiveColor { .. })))?,
         "colorLookup" => crate::adjust_cmds::lookup_from_params(p, base.filter(|b| matches!(b, Adjustment::ColorLookup { .. })))?,
+        "grade" => grade(&r, base)?,
         other => return Err(bad("adjustment", format!("unknown adjustment kind `{other}`"))),
     })
+}
+
+/// Grade knobs, in the order [`GRADE_KNOBS`] names them, with Nuke's neutral defaults.
+pub const GRADE_KNOBS: [(&str, f32); 7] =
+    [("blackpoint", 0.0), ("whitepoint", 1.0), ("lift", 0.0), ("gain", 1.0), ("multiply", 1.0), ("offset", 0.0), ("gamma", 1.0)];
+
+/// Nuke Grade: each knob a number (all channels) or `[r, g, b]`, unclamped except gamma (> 0).
+fn grade(r: &Reader, base: Option<&Adjustment>) -> Result<Adjustment> {
+    let (mut k, mut black_clamp, mut white_clamp) = (GRADE_KNOBS.map(|(_, d)| [d; 3]), true, false);
+    if let Some(Adjustment::Grade { blackpoint, whitepoint, lift, gain, multiply, offset, gamma, black_clamp: bc, white_clamp: wc }) = base {
+        k = [*blackpoint, *whitepoint, *lift, *gain, *multiply, *offset, *gamma];
+        (black_clamp, white_clamp) = (*bc, *wc);
+    }
+    for (i, (key, _)) in GRADE_KNOBS.iter().enumerate() {
+        let (lo, hi) = if *key == "gamma" { (0.01, 100.0) } else { (-1e4, 1e4) };
+        match r.get(key) {
+            None => {}
+            Some(v) if v.is_array() => {
+                let a = r.numbers(key, 3)?.unwrap_or_default();
+                k[i] = std::array::from_fn(|c| a.get(c).copied().unwrap_or(k[i][c]).clamp(lo, hi));
+            }
+            Some(v) => k[i] = [num_in(r.cmd, key, v, lo, hi)?; 3],
+        }
+    }
+    Ok(Adjustment::Grade {
+        blackpoint: k[0],
+        whitepoint: k[1],
+        lift: k[2],
+        gain: k[3],
+        multiply: k[4],
+        offset: k[5],
+        gamma: k[6],
+        black_clamp: r.boolean("blackClamp", black_clamp)?,
+        white_clamp: r.boolean("whiteClamp", white_clamp)?,
+    })
+}
+
+/// A Grade knob as params: one number when the channels agree, else `[r, g, b]`.
+fn grade_knob(v: &[f32; 3]) -> Value {
+    if v[0] == v[1] && v[1] == v[2] { json!(v[0]) } else { json!(v) }
 }
 
 /// The complete parameter set of `adj` (the inverse of [`from_params`]).
 pub fn to_params(adj: &Adjustment) -> Value {
     match adj {
+        Adjustment::Grade { blackpoint, whitepoint, lift, gain, multiply, offset, gamma, black_clamp, white_clamp } => {
+            let mut v = json!({"blackClamp": black_clamp, "whiteClamp": white_clamp});
+            for ((key, _), k) in GRADE_KNOBS.iter().zip([blackpoint, whitepoint, lift, gain, multiply, offset, gamma]) {
+                v[*key] = grade_knob(k);
+            }
+            v
+        }
         Adjustment::Invert | Adjustment::Unsupported { .. } => json!({}),
         Adjustment::BrightnessContrast { brightness, contrast, legacy } => json!({"brightness": brightness, "contrast": contrast, "legacy": legacy}),
         Adjustment::Threshold { level } => json!({"level": (level * 255.0).round()}),
@@ -236,7 +284,7 @@ pub fn to_params(adj: &Adjustment) -> Value {
             }
             v
         }
-        Adjustment::Curves { master, per_channel, space, black, pencil } => {
+        Adjustment::Curves { master, per_channel, space, black, pencil, lookup } => {
             let arr = |c: &[CurvePoint]| if *pencil { map_arr(c) } else { curve_arr(c) };
             let mut v = json!({"points": arr(master)});
             let ink = if black.len() >= 2 { black.clone() } else { identity_curve() };
@@ -249,6 +297,11 @@ pub fn to_params(adj: &Adjustment) -> Value {
             }
             if *pencil {
                 v["pencil"] = json!(true);
+            }
+            if !lookup.is_default() {
+                v["range"] = json!(lookup.span());
+                v["holdEnds"] = json!(lookup.hold_ends);
+                v["masterFirst"] = json!(lookup.master_first);
             }
             v
         }
@@ -944,7 +997,14 @@ fn eyedropper_sample(doc: &photocraft_doc::Document, hide: Option<photocraft_doc
 
 /// `[[in, out], …]` in 0..255: sorted by input, duplicates collapsed, 2..=19 points.
 pub fn parse_curve(cmd: &str, key: &str, v: &Value) -> Result<Vec<CurvePoint>> {
-    let err = || bad(cmd, format!("`{key}` must be an array of 2..={MAX_CURVE_POINTS} [input, output] pairs in 0..255"));
+    parse_curve_range(cmd, key, v, 1.0)
+}
+
+/// [`parse_curve`] for a Curves adjustment with a lookup `range` (Nuke ColorLookup style): points
+/// in 0..255 × range levels.
+fn parse_curve_range(cmd: &str, key: &str, v: &Value, range: f32) -> Result<Vec<CurvePoint>> {
+    let top = f64::from(255.0 * range);
+    let err = || bad(cmd, format!("`{key}` must be an array of 2..={MAX_CURVE_POINTS} [input, output] pairs in 0..{top}"));
     let a = v.as_array().ok_or_else(err)?;
     if a.len() < 2 || a.len() > 64 {
         return Err(err());
@@ -953,10 +1013,11 @@ pub fn parse_curve(cmd: &str, key: &str, v: &Value) -> Result<Vec<CurvePoint>> {
     for q in a {
         let q = q.as_array().filter(|q| q.len() == 2).ok_or_else(err)?;
         // Like Photoshop, a point outside 0..255 is refused rather than moved onto the edge.
-        let level = |v: Option<&Value>| v.and_then(Value::as_f64).filter(|v| (-1e-6..=255.0 + 1e-6).contains(v));
+        let level = |v: Option<&Value>| v.and_then(Value::as_f64).filter(|v| (-1e-6..=top + 1e-6).contains(v));
         let x = level(q.first()).ok_or_else(err)?;
         let y = level(q.get(1)).ok_or_else(err)?;
-        pts.push(CurvePoint { input: (x as f32).clamp(0.0, 255.0) / 255.0, output: (y as f32).clamp(0.0, 255.0) / 255.0 });
+        let top = top as f32;
+        pts.push(CurvePoint { input: (x as f32).clamp(0.0, top) / 255.0, output: (y as f32).clamp(0.0, top) / 255.0 });
     }
     pts.sort_by(|a, b| a.input.total_cmp(&b.input));
     pts.dedup_by(|later, earlier| (later.input - earlier.input).abs() < CURVE_POINT_DUPLICATE_DISTANCE);
@@ -977,23 +1038,50 @@ fn parse_map(cmd: &str, key: &str, v: &Value) -> Result<Vec<CurvePoint>> {
 
 /// A Curves channel param in the adjustment's mode: `[[in, out], …]` points (drawn into a map in
 /// pencil mode) or a [`CURVE_MAP_LEN`]-level map (fitted with points outside pencil mode).
-fn parse_curve_in(cmd: &str, key: &str, v: &Value, pencil: bool) -> Result<Vec<CurvePoint>> {
+fn parse_curve_in(cmd: &str, key: &str, v: &Value, pencil: bool, range: f32) -> Result<Vec<CurvePoint>> {
     if v.as_array().and_then(|a| a.first()).is_some_and(Value::is_number) {
         let map = parse_map(cmd, key, v)?;
         Ok(if pencil { map } else { map_to_points(&map) })
     } else {
-        let pts = parse_curve(cmd, key, v)?;
+        let pts = parse_curve_range(cmd, key, v, if pencil { 1.0 } else { range })?;
         Ok(if pencil { points_to_map(&pts) } else { pts })
     }
 }
 
 fn curves(r: &Reader<'_>, base: Option<&Adjustment>, mode: ColorMode) -> Result<Adjustment> {
-    let (mut master, mut chans, base_space, base_pencil) = match base {
-        Some(Adjustment::Curves { master, per_channel, space, black, pencil }) => {
-            (master.clone(), [per_channel[0].clone(), per_channel[1].clone(), per_channel[2].clone(), black.clone()], Some(*space), *pencil)
-        }
-        _ => (identity_curve(), std::array::from_fn(|_| identity_curve()), None, false),
+    let (mut master, mut chans, base_space, base_pencil, base_lookup) = match base {
+        Some(Adjustment::Curves { master, per_channel, space, black, pencil, lookup }) => (
+            master.clone(),
+            [per_channel[0].clone(), per_channel[1].clone(), per_channel[2].clone(), black.clone()],
+            Some(*space),
+            *pencil,
+            *lookup,
+        ),
+        _ => (identity_curve(), std::array::from_fn(|_| identity_curve()), None, false, CurveLookup::default()),
     };
+    // Nuke ColorLookup settings (range of the points and graph, ends, channel order).
+    let lookup = CurveLookup {
+        range: r.num("range", base_lookup.span(), 1.0, CurveLookup::MAX_RANGE)?,
+        hold_ends: r.boolean("holdEnds", base_lookup.hold_ends)?,
+        master_first: r.boolean("masterFirst", base_lookup.master_first)?,
+    };
+    if lookup.span() != base_lookup.span() {
+        // Straight curves follow the range (0→0, range→range); edited ones keep their points,
+        // held inside the new range.
+        let (old, new) = (base_lookup.span(), lookup.span());
+        for c in std::iter::once(&mut master).chain(chans.iter_mut()) {
+            let straight = c.len() == 2 && c[0].input == 0.0 && c[0].output == 0.0 && c[1].input == old && c[1].output == old;
+            if straight || c.len() < 2 {
+                *c = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: new, output: new }];
+            } else {
+                for p in c.iter_mut() {
+                    p.input = p.input.clamp(0.0, new);
+                    p.output = p.output.clamp(0.0, new);
+                }
+                c.dedup_by(|later, earlier| (later.input - earlier.input).abs() < CURVE_POINT_DUPLICATE_DISTANCE);
+            }
+        }
+    }
     let space = space_of(r, base_space, mode);
     if base_space.is_some_and(|b| b != space) {
         chans = std::array::from_fn(|_| identity_curve());
@@ -1012,7 +1100,7 @@ fn curves(r: &Reader<'_>, base: Option<&Adjustment>, mode: ColorMode) -> Result<
     (master, chans) = (m, [c0, c1, c2, k]);
     let composite = r.get("points").or_else(|| r.get("gray"));
     if let Some(v) = composite {
-        let c = parse_curve_in(r.cmd, "points", v, pencil)?;
+        let c = parse_curve_in(r.cmd, "points", v, pencil, lookup.span())?;
         if space == ToneSpace::Lab {
             chans[0] = c;
         } else {
@@ -1023,7 +1111,7 @@ fn curves(r: &Reader<'_>, base: Option<&Adjustment>, mode: ColorMode) -> Result<
         if let Some(v) = r.get(key)
             && let Some(slot) = chans.get_mut(i)
         {
-            *slot = parse_curve_in(r.cmd, key, v, pencil)?;
+            *slot = parse_curve_in(r.cmd, key, v, pencil, lookup.span())?;
         }
     }
     let passes = r.num("smooth", 0.0, 0.0, MAX_SMOOTH_PASSES)?.round() as usize;
@@ -1041,7 +1129,7 @@ fn curves(r: &Reader<'_>, base: Option<&Adjustment>, mode: ColorMode) -> Result<
     let [c0, c1, c2, black] = chans;
     let identity = if pencil { is_identity_map(&black) } else { photocraft_doc::adjust::is_identity_curve(&black) };
     let black = if space == ToneSpace::Cmyk && !identity { black } else { Vec::new() };
-    Ok(Adjustment::Curves { master, per_channel: [c0, c1, c2], space, black, pencil })
+    Ok(Adjustment::Curves { master, per_channel: [c0, c1, c2], space, black, pencil, lookup })
 }
 
 fn levels_obj(c: &LevelsChannel) -> Value {

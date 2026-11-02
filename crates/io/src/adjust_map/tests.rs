@@ -188,6 +188,7 @@ fn roundtrips() {
         space: ToneSpace::Rgb,
         black: Vec::new(),
         pencil: false,
+        lookup: Default::default(),
     });
     // CMYK ink curves and levels keep their black record.
     let ink = Adjustment::Curves {
@@ -196,6 +197,7 @@ fn roundtrips() {
         space: ToneSpace::Cmyk,
         black: pts(&[(0, 0), (128, 100), (255, 255)]),
         pencil: false,
+        lookup: Default::default(),
     };
     let b = write(&ink);
     assert_eq!(parse(&b[0].0, &b[0].1, None, Channels::Cmyk), ink);

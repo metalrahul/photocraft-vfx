@@ -1132,9 +1132,14 @@ fn build() -> Vec<CommandSpec> {
         (
             "curves",
             "Curves…",
-            r##"{"points":json,"red":json,"green":json,"blue":json,"pencil":bool=false,"smooth":0..10=0,"eyedropper":json} (curves as [[in,out],…] in 0..255, 2..19 points: points = composite; red/green/blue, gray, cyan/magenta/yellow/black or lightness/a/b per channel; pencil = drawn curves (Draw to modify the curve): each curve is 256 output levels in 0..255 (point curves given are drawn in, and turning pencil off fits points to the drawing); smooth = Smooth passes over the drawn curves; eyedropper = the dialog's Set Black/Neutral Gray/White Point picker {"point":"black|gray|white","at":[x,y],"size":1..101=1} or {"point",…,"color":[r,g,b] 0..1}, RGB and Grayscale (no gray) only, applied over the given curves)"##,
+            r##"{"points":json,"red":json,"green":json,"blue":json,"pencil":bool=false,"smooth":0..10=0,"eyedropper":json} (curves as [[in,out],…] in 0..255, 2..19 points: points = composite; red/green/blue, gray, cyan/magenta/yellow/black or lightness/a/b per channel; pencil = drawn curves (Draw to modify the curve): each curve is 256 output levels in 0..255 (point curves given are drawn in, and turning pencil off fits points to the drawing); smooth = Smooth passes over the drawn curves; eyedropper = the dialog's Set Black/Neutral Gray/White Point picker {"point":"black|gray|white","at":[x,y],"size":1..101=1} or {"point",…,"color":[r,g,b] 0..1}, RGB and Grayscale (no gray) only, applied over the given curves; Nuke ColorLookup style, RGB point curves: "range":1..64=1 (points and graph span 0..range: levels 0..255 × range, so 510 is 2.0; straight curves follow a range change), "holdEnds":bool=false (hold the end values past the first and last points; off: continue along the end slopes), "masterFirst":bool=false (master curve before the channel curves, as Nuke; off: after, as Photoshop); exported to the Nuke script as a ColorLookup node)"##,
         ),
         ("exposure", "Exposure…", r##"{"exposure":-20..20=0,"offset":-0.5..0.5=0,"gamma":0.01..9.99=1}"##),
+        (
+            "grade",
+            "Grade…",
+            r##"{"blackpoint":num|[r,g,b]=0,"whitepoint":num|[r,g,b]=1,"lift":num|[r,g,b]=0,"gain":num|[r,g,b]=1,"multiply":num|[r,g,b]=1,"offset":num|[r,g,b]=0,"gamma":0.01..100|[r,g,b]=1,"blackClamp":bool=true,"whiteClamp":bool=false} (Nuke's Grade node on linear values, unclamped above 1: out = (A·in + B)^(1/gamma) with A = multiply·(gain − lift)/(whitepoint − blackpoint), B = offset + lift − A·blackpoint; integer documents are graded in linear light; exported to the Nuke script as a Grade node)"##,
+        ),
         ("vibrance", "Vibrance…", r##"{"vibrance":-100..100=0,"saturation":-100..100=0}"##),
         (
             "hueSaturation",

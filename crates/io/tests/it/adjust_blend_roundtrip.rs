@@ -62,6 +62,7 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
                 space: ToneSpace::Rgb,
                 black: Vec::new(),
                 pencil: false,
+                lookup: Default::default(),
             },
             true,
         ),

@@ -51,7 +51,7 @@ pub use levels::{auto_levels, gamma_from_pos, gamma_pos};
 pub use session::{layer_editor, layer_mem, properties_coalesce, properties_reset, session_start};
 
 /// Kinds edited here (Selective Color and Color Lookup have their own editors; Invert has none).
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "brightnessContrast",
     "levels",
     "curves",
@@ -65,6 +65,7 @@ pub const KINDS: [&str; 13] = [
     "posterize",
     "threshold",
     "gradientMap",
+    "grade",
 ];
 
 pub fn has_editor(kind: &str) -> bool {
@@ -161,8 +162,73 @@ pub fn editor(ui: &mut egui::Ui, kind: &str, v: &mut Value, cx: &EditorCx) -> Ed
         "posterize" => sliders(ui, v, &[("levels", "Levels", 2.0, 255.0, 4.0, "", None)]),
         "threshold" => threshold(ui, v, cx),
         "gradientMap" => gradient_map(ui, v, cx),
+        "grade" => grade(ui, v, cx),
         _ => Edit::default(),
     }
+}
+
+/// Nuke's Grade: one slider per knob for all channels, or R/G/B sliders once the knob's
+/// "RGB" box is ticked (the params then hold `[r, g, b]`), plus the two clamps.
+fn grade(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
+    // (key, label, slider range, default). Wider values can be set through the params
+    // (scripts, actions) and the Nuke script; the sliders cover the everyday range.
+    const ROWS: [(&str, &str, f32, f32, f32); 7] = [
+        ("blackpoint", "Blackpoint", -1.0, 1.0, 0.0),
+        ("whitepoint", "Whitepoint", 0.0, 4.0, 1.0),
+        ("lift", "Lift", -1.0, 1.0, 0.0),
+        ("gain", "Gain", 0.0, 4.0, 1.0),
+        ("multiply", "Multiply", 0.0, 4.0, 1.0),
+        ("offset", "Offset", -1.0, 1.0, 0.0),
+        ("gamma", "Gamma", 0.2, 5.0, 1.0),
+    ];
+    let mut e = Edit::default();
+    for (key, text, min, max, default) in ROWS {
+        let split_id = cx.mem.with(("grade-rgb", key));
+        let channels: Option<[f32; 3]> = v.get(key).and_then(Value::as_array).filter(|a| a.len() == 3).map(|a| {
+            std::array::from_fn(|i| a[i].as_f64().map_or(default, |x| x as f32))
+        });
+        let mut split = ui.ctx().data(|d| d.get_temp::<bool>(split_id)).unwrap_or(channels.is_some());
+        ui.horizontal(|ui| {
+            let r = ui.checkbox(&mut split, "RGB").on_hover_text("Edit red, green and blue separately");
+            if r.changed() {
+                let now = channels.unwrap_or([num(v, key, default); 3]);
+                // Joining the channels keeps their average.
+                v[key] = if split { json!(now) } else { json!((now[0] + now[1] + now[2]) / 3.0) };
+                e.add(Edit::discrete(true));
+            }
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(split_id, split));
+        let gestures = || widgets::RowGestures { reset: Some(default), wheel_step: None, ..Default::default() };
+        if split {
+            let mut c = channels.unwrap_or([num(v, key, default); 3]);
+            let mut changed = false;
+            for (i, ch) in ["R", "G", "B"].iter().enumerate() {
+                let label = format!("{text} {ch}");
+                let r = widgets::slider_row_prec(ui, &label, &mut c[i], min..=max, "", None, gestures(), Some(3));
+                changed |= r.changed();
+                e.add(Edit::of(&r));
+            }
+            if changed {
+                v[key] = json!(c);
+            }
+        } else {
+            let mut x = channels.map_or_else(|| num(v, key, default), |c| (c[0] + c[1] + c[2]) / 3.0);
+            let r = widgets::slider_row_prec(ui, text, &mut x, min..=max, "", None, gestures(), Some(3));
+            if r.changed() {
+                v[key] = json!(x);
+            }
+            e.add(Edit::of(&r));
+        }
+    }
+    ui.add_space(4.0);
+    for (key, text, default) in [("blackClamp", "Black clamp", true), ("whiteClamp", "White clamp", false)] {
+        let mut on = flag(v, key, default);
+        if ui.checkbox(&mut on, text).changed() {
+            v[key] = json!(on);
+            e.add(Edit::discrete(true));
+        }
+    }
+    e
 }
 
 // ---------------------------------------------------------------------------------------------

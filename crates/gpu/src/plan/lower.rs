@@ -156,6 +156,17 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
             p[0] = [2f32.powf(*exposure), *offset, gamma.max(0.01), transfer_exponent(transfer.for_exposure())];
             (6, p, None)
         }
+        Adjustment::Grade { .. } => {
+            // compose::adjust::GradeCoefficients: a, b and 1/gamma per channel; p3 = black clamp,
+            // white clamp, the tone curve (integer documents grade in linear light), float doc.
+            let Some(g) = photocraft_compose::adjust::GradeCoefficients::of(adj) else { return (0, p, None) };
+            p[0] = [g.a[0], g.a[1], g.a[2], 0.0];
+            p[1] = [g.b[0], g.b[1], g.b[2], 0.0];
+            p[2] = [g.inv_gamma[0], g.inv_gamma[1], g.inv_gamma[2], 0.0];
+            let float = depth == photocraft_color::SampleType::F32;
+            p[3] = [f32::from(u8::from(g.black_clamp)), f32::from(u8::from(g.white_clamp)), transfer_exponent(transfer), f32::from(u8::from(float))];
+            (18, p, None)
+        }
         Adjustment::Levels { master, per_channel, space: ToneSpace::Rgb, .. } if depth == photocraft_color::SampleType::F32 => {
             // Twenty coefficients exceed the sixteen uniform parameters. Store four records
             // in LUT row 0, read texel-exact by the analytic float Levels kernel.
@@ -168,6 +179,13 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
         }
         // RGB space only (see `adjustment_on_gpu`); the rows are the CPU's channel∘master LUTs.
         Adjustment::Levels { .. } | Adjustment::Curves { .. } => {
+            // Nuke ColorLookup-style Curves (compose::adjust::lookup_tables): the composed rows
+            // over 0..range; p0 = (range, hold ends, float document).
+            if let Some(t) = adjust::lookup_tables(adj) {
+                let float = depth == photocraft_color::SampleType::F32;
+                p[0] = [t.range, if t.hold { 1.0 } else { 0.0 }, if float { 1.0 } else { 0.0 }, 0.0];
+                return (19, p, Some(t.rows.iter().map(|r| to_row(r)).collect()));
+            }
             for (v, identity) in p[0].iter_mut().zip(adjust::float_tone_identity(adj, Some(depth))) {
                 *v = if identity { 1.0 } else { 0.0 };
             }

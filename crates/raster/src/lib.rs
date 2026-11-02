@@ -1124,6 +1124,44 @@ impl Surface {
 
     /// Applies `f` to every colour sample (not alpha), including the default pixel: a tone-curve
     /// change such as linearising when a document becomes 32-bit.
+    /// Like [`Self::map_color`], but maps the three colour channels of each pixel together
+    /// (`f([r, g, b])`), for colour matrices. Alpha and extra channels are untouched, values are
+    /// not clamped (32-bit float keeps values above 1), and surfaces with fewer than three
+    /// colour channels are left alone.
+    pub fn map_rgb(&mut self, f: impl Fn([f32; 3]) -> [f32; 3]) {
+        let format = self.format;
+        if format.mode.color_channels() < 3 {
+            return;
+        }
+        let n = format.channels();
+        let mut dp = decode_pixel(&format, &self.default_pixel);
+        let o = f([dp[0], dp[1], dp[2]]);
+        dp[..3].copy_from_slice(&o);
+        encode_pixel(&format, &dp, &mut self.default_pixel);
+        let coords: Vec<TileCoord> = self.tiles.keys().copied().collect();
+        let px_count = (TILE_SIZE * TILE_SIZE) as usize;
+        // Shared tiles are mapped once and stay shared, as in `map_color` (#4531).
+        let mut done: std::collections::HashMap<*const Tile, Arc<Tile>> = std::collections::HashMap::new();
+        for c in coords {
+            let Some(key) = self.tiles.get(&c).map(Arc::as_ptr) else { continue };
+            if let Some(mapped) = done.get(&key) {
+                self.tiles.insert(c, mapped.clone());
+                continue;
+            }
+            let tile = self.tile_mut(c);
+            for i in 0..px_count {
+                let at = i * n;
+                let rgb = [0, 1, 2].map(|k| read_sample(&tile.data, format.sample, at + k));
+                for (k, v) in f(rgb).into_iter().enumerate() {
+                    write_sample(&mut tile.data, format.sample, at + k, v);
+                }
+            }
+            if let Some(mapped) = self.tiles.get(&c) {
+                done.insert(key, mapped.clone());
+            }
+        }
+    }
+
     pub fn map_color(&mut self, f: impl Fn(f32) -> f32) {
         let format = self.format;
         let color = format.mode.color_channels();

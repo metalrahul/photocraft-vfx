@@ -540,6 +540,27 @@ fn exposure(v: f32, p: vec4<f32>) -> f32 {
     return sign(lin) * pow(abs(lin), 1.0 / p.z);
 }
 
+// Nuke Grade (compose::adjust::GradeCoefficients): p0 = a, p1 = b, p2 = 1/gamma per channel,
+// p3 = (black clamp, white clamp, tone-curve exponent, float document). Integer documents are
+// decoded to linear light first and re-encoded after, as on the CPU.
+fn grade(c: vec3<f32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, p3: vec4<f32>) -> vec3<f32> {
+    let float_doc = p3.w > 0.5;
+    var x = c;
+    if (!float_doc) { x = vec3(t_decode(c.r, p3.z), t_decode(c.g, p3.z), t_decode(c.b, p3.z)); }
+    var v = p0.xyz * x + p1.xyz;
+    // Gamma on positive values only (negatives pass through, as in Nuke).
+    if (p2.x != 1.0 && v.x > 0.0) { v.x = pow(v.x, p2.x); }
+    if (p2.y != 1.0 && v.y > 0.0) { v.y = pow(v.y, p2.y); }
+    if (p2.z != 1.0 && v.z > 0.0) { v.z = pow(v.z, p2.z); }
+    if (p3.x > 0.5) { v = max(v, vec3(0.0)); }
+    if (p3.y > 0.5) { v = min(v, vec3(1.0)); }
+    if (!float_doc) {
+        v = max(v, vec3(0.0));
+        v = clamp(vec3(t_encode(v.r, p3.z), t_encode(v.g, p3.z), t_encode(v.b, p3.z)), vec3(0.0), vec3(1.0));
+    }
+    return v;
+}
+
 fn levels_float(record: i32, v: f32) -> f32 {
     let base = record * 5;
     let t = (v - lut_at(base)) / max(lut_at(base + 1) - lut_at(base), 0.000001);
@@ -554,6 +575,20 @@ fn tone_channel(row: i32, v: f32, identity: f32, extrapolate: f32) -> f32 {
         if (v > 1.0) { return textureLoad(lut_tex, vec2(4095, row), 0).r + (v - 1.0) * (textureLoad(lut_tex, vec2(4095, row), 0).r - textureLoad(lut_tex, vec2(4079, row), 0).r) * (4095.0 / 16.0); }
     }
     return lut(row, v);
+}
+
+// compose::adjust::lookup_sample: a row tabulated over 0..range, held or continued along the
+// end slopes (over 16 table steps) outside it.
+fn lookup_channel(row: i32, v: f32, range: f32, hold: bool) -> f32 {
+    let t = v / range;
+    if (!hold && abs(v) <= 3.0e38) {
+        let per_unit = 4095.0 / (16.0 * range);
+        let first = textureLoad(lut_tex, vec2(0, row), 0).r;
+        let last = textureLoad(lut_tex, vec2(4095, row), 0).r;
+        if (t < 0.0) { return first + v * (textureLoad(lut_tex, vec2(16, row), 0).r - first) * per_unit; }
+        if (t > 1.0) { return last + (v - range) * (last - textureLoad(lut_tex, vec2(4079, row), 0).r) * per_unit; }
+    }
+    return lut(row, t);
 }
 
 fn adjust(c: vec3<f32>) -> vec3<f32> {
@@ -584,6 +619,14 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             return clamp(v, vec3(0.0), vec3(1.0));
         }
         case 6: { return vec3(exposure(c.r, p0), exposure(c.g, p0), exposure(c.b, p0)); }
+        case 18: { return grade(c, p0, p1, p2, p3); }
+        case 19: {
+            // Nuke ColorLookup-style Curves: p0 = (range, hold ends, float document).
+            let hold = p0.y > 0.5;
+            let o = vec3(lookup_channel(0, c.r, p0.x, hold), lookup_channel(1, c.g, p0.x, hold), lookup_channel(2, c.b, p0.x, hold));
+            if (p0.z > 0.5) { return o; }
+            return clamp(o, vec3(0.0), vec3(1.0));
+        }
         case 7: { return vec3(tone_channel(0, c.r, p0.x, p0.w), tone_channel(1, c.g, p0.y, p0.w), tone_channel(2, c.b, p0.z, p0.w)); }
         case 17: { return vec3(levels_float(0, levels_float(1, c.r)), levels_float(0, levels_float(2, c.g)), levels_float(0, levels_float(3, c.b))); }
         case 8: {

@@ -650,7 +650,7 @@ fn make_adjustment(a: &AdjSpec) -> Adjustment {
         AdjSpec::Curves { channel, points } => {
             let curve: Vec<CurvePoint> = points.iter().map(|(input, output)| CurvePoint { input: *input, output: *output }).collect();
             let pick = |c: usize| if c == *channel { curve.clone() } else { Vec::new() };
-            Adjustment::Curves { master: pick(4), per_channel: [pick(0), pick(1), pick(2)], space: ToneSpace::Cmyk, black: pick(3), pencil: false }
+            Adjustment::Curves { master: pick(4), per_channel: [pick(0), pick(1), pick(2)], space: ToneSpace::Cmyk, black: pick(3), pencil: false, lookup: Default::default() }
         }
     }
 }
@@ -1659,6 +1659,7 @@ fn black_records_reach_k_through_the_stand_ins() {
             space: ToneSpace::Cmyk,
             black: vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 0.6 }],
             pencil: false,
+            lookup: Default::default(),
         },
     ] {
         let mut d = doc(3, 1);

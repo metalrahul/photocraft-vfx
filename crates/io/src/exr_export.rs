@@ -36,6 +36,46 @@ pub struct ExportLayer {
     /// Hidden layers are still written to the EXR, but their Merge is disabled and the flat
     /// beauty leaves them out, as the Layers panel does.
     pub visible: bool,
+    /// A Grade or RGB Curves adjustment layer: no pixels in the EXR, a Nuke `Grade` or
+    /// `ColorLookup` node on the comp chain instead of a Shuffle → Premult → Merge column
+    /// (`opacity` is its mix).
+    pub adjustment: Option<photocraft_doc::Adjustment>,
+}
+
+/// A Grade knob as `.nk` text: one value when the channels agree, else `{r g b a}` with
+/// alpha at the knob's neutral value (the node grades rgb only).
+fn nk_knob(v: &[f32; 3], neutral: f32) -> String {
+    if v[0] == v[1] && v[1] == v[2] { format!("{}", v[0]) } else { format!("{{{} {} {} {neutral}}}", v[0], v[1], v[2]) }
+}
+
+/// The body of a Nuke `Grade` node for a Grade adjustment (knobs at their defaults omitted).
+fn nk_grade_knobs(adj: &photocraft_doc::Adjustment) -> String {
+    let photocraft_doc::Adjustment::Grade { blackpoint, whitepoint, lift, gain, multiply, offset, gamma, black_clamp, white_clamp } = adj else {
+        return String::new();
+    };
+    let mut s = String::from(" channels rgb\n");
+    for (key, v, neutral) in [
+        ("blackpoint", blackpoint, 0.0),
+        ("whitepoint", whitepoint, 1.0),
+        ("black", lift, 0.0),
+        ("white", gain, 1.0),
+        ("multiply", multiply, 1.0),
+        ("add", offset, 0.0),
+        ("gamma", gamma, 1.0),
+    ] {
+        if v.iter().any(|c| *c != neutral) {
+            s.push_str(&format!(" {key} {}\n", nk_knob(v, neutral)));
+        }
+    }
+    if !black_clamp {
+        s.push_str(" black_clamp false\n");
+    }
+    if *white_clamp {
+        s.push_str(" white_clamp true\n");
+    }
+    // PhotoCraft grades the composite's straight colour; the comp pipe is premultiplied.
+    s.push_str(" unpremult rgba.alpha\n");
+    s
 }
 
 /// Only ASCII alphanumerics and '_' survive. No dots (they create sub-layers),
@@ -91,6 +131,7 @@ fn backdrop_color(op: &str, is_base: bool) -> &'static str {
         "difference" | "exclusion" | "from" | "minus" | "divide" | "average" | "geometric" | "hypot" => {
             "0x335a4aff" // math: green
         }
+        "grade" | "colorlookup" => "0x5a3a3aff",                       // colour correction: red
         _ => "0x404040ff",                                            // over: grey
     }
 }
@@ -119,7 +160,7 @@ pub fn generate_nuke_script(
 
     // Register every layer before any node references it, otherwise a Shuffle's
     // `in <layer>` resolves to `none` for names Nuke hasn't seen this session.
-    for layer in layers {
+    for layer in layers.iter().filter(|l| l.adjustment.is_none()) {
         let n = &layer.name;
         nk.push_str(&format!(
             "add_layer {{{n} {n}.red {n}.green {n}.blue {n}.alpha}}\n"
@@ -152,7 +193,41 @@ pub fn generate_nuke_script(
     for (i, layer) in layers.iter().enumerate() {
         let name = &layer.name;
         let x = (i as i32) * COL_W;
-        let is_base = i == 0;
+
+        // An adjustment: a Grade or ColorLookup node on the comp chain (nothing to adjust before
+        // the base).
+        if let Some(adj) = &layer.adjustment {
+            if comp.is_empty() {
+                continue;
+            }
+            let (class, knobs, op) = match adj {
+                photocraft_doc::Adjustment::Grade { .. } => ("Grade", nk_grade_knobs(adj), "grade"),
+                _ => ("ColorLookup", nk_lookup_knobs(adj), "colorlookup"),
+            };
+            nk.push_str(&format!(
+                "push ${comp}\n{class} {{\n{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {MERGE_Y}\n}}\nset N{class}_{name} [stack 0]\n",
+                if layer.visible { "" } else { " disable true\n" },
+                layer.opacity.clamp(0.0, 1.0)
+            ));
+            comp = format!("N{class}_{name}");
+            let pct = (layer.opacity.clamp(0.0, 1.0) * 100.0).round() as i32;
+            let sub = if !layer.visible {
+                "hidden".to_string()
+            } else if pct < 100 {
+                format!("{op}  {pct}%")
+            } else {
+                op.to_string()
+            };
+            backdrops.push_str(&format!(
+                "BackdropNode {{\n inputs 0\n name BD_{name}\n tile_color {}\n label \"<center><b>{name}</b>\\n<font size=2>{sub}</font></center>\"\n note_font_size 18\n xpos {}\n ypos {BD_Y}\n bdwidth {}\n bdheight {BD_H}\n z_order 1\n}}\n",
+                backdrop_color(op, false),
+                x - 50,
+                COL_W - 20
+            ));
+            continue;
+        }
+
+        let is_base = comp.is_empty();
         let (op, exact) = nuke_merge_operation(layer.blend_mode);
 
         // Bus Dot, chained off the previous one (first off the Read).
@@ -230,6 +305,50 @@ pub fn generate_nuke_script(
     nk
 }
 
+/// `px` (straight linear RGBA) through `adj` as a 32-bit linear document applies it.
+fn adjusted_px(adj: &photocraft_doc::Adjustment, px: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    use photocraft_color::{ColorMode, SampleType};
+    use photocraft_compose::adjust::{Transfer, apply_depth};
+    let mut buf = photocraft_compose::Buffer { rect: photocraft_geom::Rect::from_xywh(0, 0, px.len().max(1) as u32, 1), px: px.to_vec() };
+    apply_depth(adj, &mut buf, Transfer::for_document(ColorMode::Rgb, SampleType::F32), Some(SampleType::F32));
+    buf.px
+}
+
+/// The body of a Nuke `ColorLookup` node reproducing a Curves adjustment as PhotoCraft applies
+/// it in 32-bit: each channel's response (master and channel curves composed in the layer's
+/// order) sampled at 129 points over the curves' range with linear keys, plus a key far below
+/// and far above so its ends (held or continued along their slopes) carry over whatever
+/// extrapolation Nuke uses. The master and alpha curves are identity.
+fn nk_lookup_knobs(adj: &photocraft_doc::Adjustment) -> String {
+    let range = match adj {
+        photocraft_doc::Adjustment::Curves { lookup, pencil: false, .. } => lookup.span(),
+        _ => 1.0,
+    };
+    let mut xs = vec![-100.0 * range];
+    xs.extend((0..=128).map(|k| k as f32 / 128.0 * range));
+    xs.push(100.0 * range);
+    let px: Vec<[f32; 4]> = xs.iter().map(|&x| [x, x, x, 1.0]).collect();
+    let ys = adjusted_px(adj, &px);
+    let curve = |c: usize| {
+        let keys: Vec<String> = xs.iter().zip(&ys).map(|(x, y)| format!("x{x} {}", y[c])).collect();
+        format!("{{curve L {}}}", keys.join(" "))
+    };
+    let identity = "{curve L x-100000 -100000 x100000 100000}";
+    format!(" channels rgb\n lut {{master {identity}\n  red {}\n  green {}\n  blue {}\n  alpha {identity}}}\n unpremult rgba.alpha\n", curve(0), curve(1), curve(2))
+}
+
+/// `base`, or `base_2`, `base_3`, … when an earlier layer already has that name (EXR layer
+/// prefixes and node names must be unique).
+fn unique_name(layers: &[ExportLayer], base: &str) -> String {
+    let mut name = base.to_string();
+    let mut suffix = 2usize;
+    while layers.iter().any(|l| l.name == name) {
+        name = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    name
+}
+
 pub fn export_multichannel_exr_with_options(
     doc: &Document,
     path: &Path,
@@ -262,20 +381,28 @@ pub fn export_multichannel_exr_with_options(
             };
             let base_name = sanitize_layer_name(&raw);
 
-            let mut layer_name = base_name.clone();
-            let mut suffix = 2usize;
-            while extracted.iter().any(|(existing, _)| existing == &layer_name) {
-                layer_name = format!("{}_{}", base_name, suffix);
-                suffix += 1;
-            }
-
+            let layer_name = unique_name(&nuke_layers, &base_name);
             nuke_layers.push(ExportLayer {
                 name: layer_name.clone(),
                 blend_mode: doc_layer.blend,
                 opacity: doc_layer.opacity * doc_layer.fill_opacity,
                 visible: doc_layer.visible && parent_visible,
+                adjustment: None,
             });
             extracted.push((layer_name, px_data));
+        } else if let LayerContent::Adjustment(
+            adj @ (photocraft_doc::Adjustment::Grade { .. }
+            | photocraft_doc::Adjustment::Curves { space: photocraft_doc::adjust::ToneSpace::Rgb, .. }),
+        ) = &doc_layer.content
+        {
+            let raw = if doc_layer.name.trim().is_empty() { adj.label().to_string() } else { doc_layer.name.clone() };
+            nuke_layers.push(ExportLayer {
+                name: unique_name(&nuke_layers, &sanitize_layer_name(&raw)),
+                blend_mode: BlendMode::Normal,
+                opacity: doc_layer.opacity * doc_layer.fill_opacity,
+                visible: doc_layer.visible && parent_visible,
+                adjustment: Some(adj.clone()),
+            });
         }
 
         if let Some(children) = doc_layer.children() {
@@ -293,13 +420,32 @@ pub fn export_multichannel_exr_with_options(
         // layer with its operation and mix, using the Merge maths the canvas renders
         // (photocraft_color::blend::composite, straight alpha in and out). Hidden layers are
         // skipped, as their Merges are disabled.
+        // Grade and Curves adjustments change the composite's straight colour by their mix,
+        // through the compositor's own adjustment maths, as their nodes do (unpremult by
+        // alpha); one before the base layer has nothing to adjust.
         let mut flat_data = vec![[0.0_f32; 4]; width * height];
-        for (idx, (_, layer_data)) in extracted.iter().enumerate() {
-            let layer = &nuke_layers[idx];
+        let mut pixels = extracted.iter();
+        let mut first = true;
+        for layer in &nuke_layers {
+            if let Some(adj) = &layer.adjustment {
+                if first || !layer.visible {
+                    continue;
+                }
+                let mix = layer.opacity.clamp(0.0, 1.0);
+                let adjusted = adjusted_px(adj, &flat_data);
+                for (p, a) in flat_data.iter_mut().zip(adjusted).filter(|(p, _)| p[3] > 0.0) {
+                    for c in 0..3 {
+                        p[c] += (a[c] - p[c]) * mix;
+                    }
+                }
+                continue;
+            }
+            let Some((_, layer_data)) = pixels.next() else { break };
+            let mode = if first { BlendMode::Normal } else { layer.blend_mode };
+            first = false;
             if !layer.visible {
                 continue;
             }
-            let mode = if idx == 0 { BlendMode::Normal } else { layer.blend_mode };
             let mix = layer.opacity.clamp(0.0, 1.0);
             for (dst, src) in flat_data.iter_mut().zip(layer_data) {
                 *dst = photocraft_color::blend::composite(mode, *dst, *src, mix);
