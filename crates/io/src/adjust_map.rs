@@ -704,7 +704,7 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
         }
         // Nuke's Grade has no Photoshop adjustment: nothing is written and PSD export warns
         // (`.pcraft` and the EXR/Nuke script keep it).
-        Adjustment::Grade { .. } => {}
+        Adjustment::Grade { .. } | Adjustment::OcioColorSpace { .. } => {}
         Adjustment::Unsupported { psd_key, raw } => {
             let k = psd_key.as_bytes();
             if k.len() == 4 {

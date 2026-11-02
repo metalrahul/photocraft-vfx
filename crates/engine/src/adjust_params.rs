@@ -206,6 +206,7 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
         "selectiveColor" => crate::adjust_cmds::selective_from_params(p, base.filter(|b| matches!(b, Adjustment::SelectiveColor { .. })))?,
         "colorLookup" => crate::adjust_cmds::lookup_from_params(p, base.filter(|b| matches!(b, Adjustment::ColorLookup { .. })))?,
         "grade" => grade(&r, base)?,
+        "ocioColorspace" => ocio_colorspace(&r, base)?,
         other => return Err(bad("adjustment", format!("unknown adjustment kind `{other}`"))),
     })
 }
@@ -245,6 +246,34 @@ fn grade(r: &Reader, base: Option<&Adjustment>) -> Result<Adjustment> {
     })
 }
 
+/// Nuke's OCIOColorSpace: `in` and `out` colour spaces of the OpenColorIO config. New layers
+/// start at the config's scene-linear space for both (an identity), like a fresh Nuke node.
+/// Names are checked against the config when this build has OpenColorIO.
+fn ocio_colorspace(r: &Reader, base: Option<&Adjustment>) -> Result<Adjustment> {
+    let config = photocraft_ocio::current().ok();
+    let linear = config.as_ref().and_then(|c| c.role("scene_linear")).unwrap_or_else(|| "ACEScg".to_string());
+    let (mut input, mut output) = match base {
+        Some(Adjustment::OcioColorSpace { input, output }) => (input.clone(), output.clone()),
+        _ => (linear.clone(), linear),
+    };
+    for (key, slot) in [("in", &mut input), ("out", &mut output)] {
+        match r.get(key) {
+            None => {}
+            Some(Value::String(name)) => {
+                if let Some(c) = &config
+                    && !c.has(name)
+                    && c.role(name).is_none()
+                {
+                    return Err(bad(r.cmd, format!("`{key}`: no colour space or role \"{name}\" in the OCIO config \"{}\"", c.name())));
+                }
+                *slot = name.clone();
+            }
+            Some(_) => return Err(bad(r.cmd, format!("`{key}` must be a colour space name"))),
+        }
+    }
+    Ok(Adjustment::OcioColorSpace { input, output })
+}
+
 /// A Grade knob as params: one number when the channels agree, else `[r, g, b]`.
 fn grade_knob(v: &[f32; 3]) -> Value {
     if v[0] == v[1] && v[1] == v[2] { json!(v[0]) } else { json!(v) }
@@ -253,6 +282,7 @@ fn grade_knob(v: &[f32; 3]) -> Value {
 /// The complete parameter set of `adj` (the inverse of [`from_params`]).
 pub fn to_params(adj: &Adjustment) -> Value {
     match adj {
+        Adjustment::OcioColorSpace { input, output } => json!({"in": input, "out": output}),
         Adjustment::Grade { blackpoint, whitepoint, lift, gain, multiply, offset, gamma, black_clamp, white_clamp } => {
             let mut v = json!({"blackClamp": black_clamp, "whiteClamp": white_clamp});
             for ((key, _), k) in GRADE_KNOBS.iter().zip([blackpoint, whitepoint, lift, gain, multiply, offset, gamma]) {

@@ -3,7 +3,7 @@ use photocraft_color::{BlendMode, Color, PixelFormat, SampleType};
 use photocraft_doc::Size;
 use serde_json::json;
 
-const KINDS: [&str; 14] = crate::adjust_editors::KINDS;
+const KINDS: [&str; 15] = crate::adjust_editors::KINDS;
 
 /// Settings that move every kind well away from neutral.
 pub(crate) fn sample(kind: &str) -> Value {
@@ -22,6 +22,7 @@ pub(crate) fn sample(kind: &str) -> Value {
         "threshold" => json!({"level": 90}),
         "gradientMap" => json!({"stops": [[0, "#200040"], [1, "#ffd080"]]}),
         "grade" => json!({"lift": 0.02, "gain": 1.3, "gamma": 0.9}),
+        "ocioColorspace" => json!({"in": "ACEScg", "out": "ACEScct"}),
         _ => json!({}),
     }
 }
@@ -106,7 +107,7 @@ pub(crate) fn max_diff(a: &Document, b: &Document) -> f32 {
 }
 
 /// Kinds that make colour from gray: grayscale documents preview them on the CPU proxy.
-const GRAY_COLOUR: [&str; 6] = ["vibrance", "colorBalance", "blackWhite", "photoFilter", "channelMixer", "gradientMap"];
+const GRAY_COLOUR: [&str; 7] = ["vibrance", "colorBalance", "blackWhite", "photoFilter", "channelMixer", "gradientMap", "ocioColorspace"];
 
 #[test]
 fn preview_composite_matches_the_destructive_command() {

@@ -1136,6 +1136,11 @@ fn build() -> Vec<CommandSpec> {
         ),
         ("exposure", "Exposure…", r##"{"exposure":-20..20=0,"offset":-0.5..0.5=0,"gamma":0.01..9.99=1}"##),
         (
+            "ocioColorspace",
+            "OCIO Colorspace…",
+            r##"{"in":str="scene_linear role","out":str="scene_linear role"} (Nuke's OCIOColorSpace: converts from colour space `in` to `out` of the OpenColorIO config, unclamped float; names (or roles) from the config, e.g. "ACEScg", "ACEScct", "ARRI LogC3 (EI800)", "sRGB - Texture"; exported to the Nuke script as an OCIOColorSpace node)"##,
+        ),
+        (
             "grade",
             "Grade…",
             r##"{"blackpoint":num|[r,g,b]=0,"whitepoint":num|[r,g,b]=1,"lift":num|[r,g,b]=0,"gain":num|[r,g,b]=1,"multiply":num|[r,g,b]=1,"offset":num|[r,g,b]=0,"gamma":0.01..100|[r,g,b]=1,"blackClamp":bool=true,"whiteClamp":bool=false} (Nuke's Grade node on linear values, unclamped above 1: out = (A·in + B)^(1/gamma) with A = multiply·(gain − lift)/(whitepoint − blackpoint), B = offset + lift − A·blackpoint; integer documents are graded in linear light; exported to the Nuke script as a Grade node)"##,

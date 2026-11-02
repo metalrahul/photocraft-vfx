@@ -104,7 +104,9 @@ pub fn adjustment_on_gpu(adj: &Adjustment, mode: photocraft_color::ColorMode) ->
         photocraft_color::ColorMode::Cmyk => cmyk_channel_adjustment(adj),
         _ => false,
     };
-    !tone_in_space && !own_channels
+    // OpenColorIO conversions run on the CPU (exact; the GPU has no OCIO kernel yet).
+    let ocio = matches!(adj, Adjustment::OcioColorSpace { .. });
+    !tone_in_space && !own_channels && !ocio
 }
 
 /// A tone transfer as the shader's `t_decode`/`t_encode` exponent (0: the sRGB curve).
@@ -280,8 +282,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
             p[0] = [n as f32, if *tetrahedral { 1.0 } else { 0.0 }, if *dither { 1.0 } else { 0.0 }, 0.0];
             (16, p, Some(rows))
         }
-        // Identity on the CPU too (not evaluated there).
-        Adjustment::ColorLookup { .. } | Adjustment::Unsupported { .. } => (0, p, None),
+        // Identity on the CPU too (not evaluated there). OCIO never reaches the GPU
+        // (`adjustment_on_gpu`).
+        Adjustment::ColorLookup { .. } | Adjustment::OcioColorSpace { .. } | Adjustment::Unsupported { .. } => (0, p, None),
     }
 }
 

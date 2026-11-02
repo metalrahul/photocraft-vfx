@@ -51,7 +51,7 @@ pub use levels::{auto_levels, gamma_from_pos, gamma_pos};
 pub use session::{layer_editor, layer_mem, properties_coalesce, properties_reset, session_start};
 
 /// Kinds edited here (Selective Color and Color Lookup have their own editors; Invert has none).
-pub const KINDS: [&str; 14] = [
+pub const KINDS: [&str; 15] = [
     "brightnessContrast",
     "levels",
     "curves",
@@ -66,6 +66,7 @@ pub const KINDS: [&str; 14] = [
     "threshold",
     "gradientMap",
     "grade",
+    "ocioColorspace",
 ];
 
 pub fn has_editor(kind: &str) -> bool {
@@ -163,8 +164,50 @@ pub fn editor(ui: &mut egui::Ui, kind: &str, v: &mut Value, cx: &EditorCx) -> Ed
         "threshold" => threshold(ui, v, cx),
         "gradientMap" => gradient_map(ui, v, cx),
         "grade" => grade(ui, v, cx),
+        "ocioColorspace" => ocio_colorspace(ui, v),
         _ => Edit::default(),
     }
+}
+
+/// Nuke's OCIOColorSpace: In and Out colour spaces of the OpenColorIO config, listed with their
+/// families as Nuke's menus group them, and a Swap button.
+fn ocio_colorspace(ui: &mut egui::Ui, v: &mut Value) -> Edit {
+    let mut e = Edit::default();
+    let config = match photocraft_ocio::current() {
+        Ok(c) => c,
+        Err(why) => {
+            ui.label(RichText::new(why).color(Tokens::get(ui.ctx()).text_faint));
+            return e;
+        }
+    };
+    let linear = config.role("scene_linear").unwrap_or_else(|| "ACEScg".to_string());
+    let labels: Vec<(String, String)> = config
+        .colorspaces()
+        .iter()
+        .map(|c| (c.name.clone(), if c.family.is_empty() { c.name.clone() } else { format!("{}  ·  {}", c.name, c.family) }))
+        .collect();
+    let opts: Vec<(String, &str)> = labels.iter().map(|(n, l)| (n.clone(), l.as_str())).collect();
+    for (key, text) in [("in", "In"), ("out", "Out")] {
+        let mut cur = v.get(key).and_then(Value::as_str).map_or_else(|| linear.clone(), str::to_string);
+        ui.horizontal(|ui| {
+            ui.add_sized(vec2(32.0, 18.0), egui::Label::new(text));
+            if widgets::dropdown_literal(ui, &format!("ocio-colorspace-{key}"), text, &mut cur, &opts, 240.0) {
+                v[key] = json!(cur);
+                e.add(Edit::discrete(true));
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        if ui.button("⇄ Swap").on_hover_text("Swap In and Out (the inverse conversion)").clicked() {
+            let (i, o) = (v.get("in").cloned().unwrap_or_else(|| json!(linear)), v.get("out").cloned().unwrap_or_else(|| json!(linear)));
+            v["in"] = o;
+            v["out"] = i;
+            e.add(Edit::discrete(true));
+        }
+        let t = Tokens::get(ui.ctx());
+        ui.label(RichText::new(format!("Config: {}", config.name())).color(t.text_faint).size(11.0));
+    });
+    e
 }
 
 /// Nuke's Grade: one slider per knob for all channels, or R/G/B sliders once the knob's

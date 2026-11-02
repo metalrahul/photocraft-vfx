@@ -24,6 +24,7 @@ photocraft-cms = { workspace = true }
 photocraft-raster = { workspace = true }
 photocraft-doc = { workspace = true }
 photocraft-compose = { workspace = true }
+photocraft-ocio = { workspace = true }
 photocraft-algo = { workspace = true }
 photocraft-psd = { workspace = true }
 photocraft-codecs = { workspace = true }

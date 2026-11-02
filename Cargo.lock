@@ -5238,6 +5238,7 @@ dependencies = [
  "photocraft-color",
  "photocraft-doc",
  "photocraft-geom",
+ "photocraft-ocio",
  "photocraft-paint",
  "photocraft-raster",
  "photocraft-vector",
@@ -5277,6 +5278,7 @@ dependencies = [
  "photocraft-geom",
  "photocraft-io",
  "photocraft-ipp",
+ "photocraft-ocio",
  "photocraft-ops",
  "photocraft-paint",
  "photocraft-plugins",
@@ -5375,6 +5377,7 @@ dependencies = [
  "photocraft-doc",
  "photocraft-format",
  "photocraft-geom",
+ "photocraft-ocio",
  "photocraft-paint",
  "photocraft-psd",
  "photocraft-raster",
@@ -5396,6 +5399,13 @@ dependencies = [
 [[package]]
 name = "photocraft-ipp"
 version = "0.18.0"
+
+[[package]]
+name = "photocraft-ocio"
+version = "0.18.0"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "photocraft-ops"
@@ -5532,6 +5542,7 @@ dependencies = [
  "photocraft-geom",
  "photocraft-gpu",
  "photocraft-io",
+ "photocraft-ocio",
  "photocraft-paint",
  "photocraft-plugins",
  "photocraft-psd",

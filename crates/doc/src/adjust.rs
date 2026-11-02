@@ -366,6 +366,13 @@ pub enum Adjustment {
         #[serde(default)]
         white_clamp: bool,
     },
+    /// Nuke's OCIOColorSpace: converts the composite from colour space `input` to `output` of
+    /// the process-wide OpenColorIO config (`photocraft_ocio::current`), unclamped float.
+    /// PhotoCraft-only: PSD export has no equivalent; `.pcraft` and the Nuke script keep it.
+    OcioColorSpace {
+        input: String,
+        output: String,
+    },
     /// A PSD adjustment we can't evaluate yet; preserved raw for round-trip, shared between
     /// document snapshots (#4535).
     Unsupported {
@@ -394,6 +401,7 @@ impl Adjustment {
             Adjustment::GradientMap { .. } => "Gradient Map",
             Adjustment::SelectiveColor { .. } => "Selective Color",
             Adjustment::Grade { .. } => "Grade",
+            Adjustment::OcioColorSpace { .. } => "OCIO Colorspace",
             Adjustment::Unsupported { .. } => "Adjustment",
         }
     }

@@ -89,6 +89,20 @@ The other built-in ICC profiles and the generated LUT looks are produced by code
 (`crates/cms/src/builtin.rs`, `crates/cms/src/lutfile.rs`) and dedicated to the public domain
 (CC0-1.0); they are not separate files.
 
+## Linked native libraries (PhotoCraft VFX)
+
+Desktop builds of the VFX branch link these statically through `crates/ocio` (built by vcpkg from the repo's `vcpkg.json`). Their notices ship with the app.
+
+| Library | Use | License |
+|---|---|---|
+| [OpenColorIO](https://github.com/AcademySoftwareFoundation/OpenColorIO) 2.4.2 | Colour spaces and conversions (Nuke-matched), built-in ACES configs | BSD-3-Clause |
+| [yaml-cpp](https://github.com/jbeder/yaml-cpp) | OCIO config parsing | MIT |
+| [Expat](https://github.com/libexpat/libexpat) | OCIO XML LUT parsing | MIT |
+| [Imath](https://github.com/AcademySoftwareFoundation/Imath) | OCIO half floats | BSD-3-Clause |
+| [pystring](https://github.com/imageworks/pystring) | OCIO string helpers | BSD-3-Clause |
+| [minizip-ng](https://github.com/zlib-ng/minizip-ng) | OCIO archived configs | Zlib |
+| [zlib](https://zlib.net/) | Compression for minizip-ng | Zlib |
+
 ## Documentation and README
 
 | Path | Title | Author | Source | License |

@@ -307,6 +307,22 @@ fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
                 map_rgb(buf, |c| g.apply(c.map(|v| transfer.decode(v))).map(|v| transfer.encode(v.max(0.0)).clamp(0.0, 1.0)));
             }
         }
+        Adjustment::OcioColorSpace { input, output } => {
+            // The process-wide OCIO config; without OpenColorIO (or for unknown spaces) the
+            // layer is an identity, as Nuke shows an erroring node's input.
+            if input == output {
+                return;
+            }
+            let Some(p) = photocraft_ocio::current().and_then(|c| c.processor(input, output)).ok().filter(|p| !p.is_noop()) else { return };
+            p.apply_rgba(&mut buf.px);
+            if depth != Some(SampleType::F32) {
+                for px in &mut buf.px {
+                    for v in &mut px[..3] {
+                        *v = v.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
         // Not evaluated: identity (still round-trips through PSD).
         Adjustment::ColorLookup { .. } | Adjustment::Unsupported { .. } => {}
     }

@@ -273,6 +273,19 @@ git clone https://github.com/storytold/craft-fonts ../craft-fonts
 CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo run --release -p photocraft
 ```
 
+### Building with OpenColorIO (PhotoCraft VFX)
+
+The VFX branch links [OpenColorIO](https://opencolorio.org/) (the colour management Nuke uses) statically, so releases need nothing installed. To build it yourself you need [vcpkg](https://github.com/microsoft/vcpkg) once; the repo's `vcpkg.json` pins OpenColorIO 2.4.2 and the first `cargo build` builds it into `vcpkg_installed/` (10–20 minutes, then cached):
+
+```sh
+git clone https://github.com/microsoft/vcpkg ../vcpkg
+../vcpkg/bootstrap-vcpkg.sh          # Windows: ..\vcpkg\bootstrap-vcpkg.bat
+export VCPKG_ROOT="$PWD/../vcpkg"     # Windows: setx VCPKG_ROOT <path>, then a new terminal
+cargo build --release -p photocraft
+```
+
+`OCIO_ROOT=<prefix>` uses an existing OpenColorIO 2.4.2 install instead, and `PHOTOCRAFT_NO_OCIO=1` builds without it (no OCIO colorspace features; the web build always does). The default config is OCIO's built-in ACES 1.3 studio config; `crates/ocio` explains the rest.
+
 New contributors and AI agents: start with [`AGENTS.md`](AGENTS.md), then [`docs/`](docs/).
 
 Installers for macOS, Windows, Linux, FreeBSD and the web are attached to each [GitHub release](https://github.com/storytold/photocraft/releases). On Linux you can pick an AppImage, a `.deb`, an `.rpm`, a tarball or a Flatpak bundle. The bundle needs the freedesktop runtime from [Flathub](https://flathub.org/setup), which `flatpak` offers to install along with it:

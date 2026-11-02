@@ -36,8 +36,9 @@ pub struct ExportLayer {
     /// Hidden layers are still written to the EXR, but their Merge is disabled and the flat
     /// beauty leaves them out, as the Layers panel does.
     pub visible: bool,
-    /// A Grade or RGB Curves adjustment layer: no pixels in the EXR, a Nuke `Grade` or
-    /// `ColorLookup` node on the comp chain instead of a Shuffle → Premult → Merge column
+    /// A Grade, RGB Curves or OCIO Colorspace adjustment layer: no pixels in the EXR, a Nuke
+    /// `Grade`, `ColorLookup` or `OCIOColorSpace` node on the comp chain instead of a
+    /// Shuffle → Premult → Merge column
     /// (`opacity` is its mix).
     pub adjustment: Option<photocraft_doc::Adjustment>,
 }
@@ -132,6 +133,7 @@ fn backdrop_color(op: &str, is_base: bool) -> &'static str {
             "0x335a4aff" // math: green
         }
         "grade" | "colorlookup" => "0x5a3a3aff",                       // colour correction: red
+        "ocio" => "0x3a4a5aff",                                        // colour space: slate
         _ => "0x404040ff",                                            // over: grey
     }
 }
@@ -152,10 +154,18 @@ pub fn generate_nuke_script(
 ) -> String {
     let (w, h) = (width, height);
     let fmt = format!("{w} {h} 0 0 {w} {h} 1 custom");
+    // A script with OCIOColorSpace nodes uses PhotoCraft's OCIO config, so their colour space
+    // names resolve; otherwise Nuke's default colour management, as before.
+    let ocio = layers
+        .iter()
+        .any(|l| matches!(l.adjustment, Some(photocraft_doc::Adjustment::OcioColorSpace { .. })))
+        .then(|| photocraft_ocio::current().ok().map(|c| c.uri().to_string()))
+        .flatten();
     let mut nk = String::new();
 
     nk.push_str(&format!(
-        "Root {{\n inputs 0\n format \"{fmt}\"\n project_directory \"[python {{nuke.script_directory()}}]\"\n colorManagement Nuke\n workingSpaceLUT linear\n}}\n"
+        "Root {{\n inputs 0\n format \"{fmt}\"\n project_directory \"[python {{nuke.script_directory()}}]\"\n{}}}\n",
+        root_color(&ocio)
     ));
 
     // Register every layer before any node references it, otherwise a Shuffle's
@@ -182,8 +192,10 @@ pub fn generate_nuke_script(
     let n = layers.len() as i32;
 
     nk.push_str(&format!(
-        "Read {{\n inputs 0\n file_type exr\n file \"[python {{nuke.script_directory()}}]/{}\"\n format \"{fmt}\"\n origset true\n colorspace linear\n name Read_MultiChannel\n xpos 0\n ypos {READ_Y}\n}}\nset NRead_MultiChannel [stack 0]\n",
-        tcl_escape(exr_filename)
+        "Read {{\n inputs 0\n file_type exr\n file \"[python {{nuke.script_directory()}}]/{}\"\n format \"{fmt}\"\n origset true\n colorspace {}\n name Read_MultiChannel\n xpos 0\n ypos {READ_Y}\n}}\nset NRead_MultiChannel [stack 0]\n",
+        tcl_escape(exr_filename),
+        // The EXR is scene-linear: Nuke's `linear`, or the OCIO config's scene_linear role.
+        if ocio.is_some() { "scene_linear" } else { "linear" }
     ));
 
     let mut backdrops = String::new();
@@ -202,6 +214,11 @@ pub fn generate_nuke_script(
             }
             let (class, knobs, op) = match adj {
                 photocraft_doc::Adjustment::Grade { .. } => ("Grade", nk_grade_knobs(adj), "grade"),
+                photocraft_doc::Adjustment::OcioColorSpace { input, output } => (
+                    "OCIOColorSpace",
+                    format!(" in_colorspace \"{}\"\n out_colorspace \"{}\"\n unpremult rgba.alpha\n", tcl_escape(input), tcl_escape(output)),
+                    "ocio",
+                ),
                 _ => ("ColorLookup", nk_lookup_knobs(adj), "colorlookup"),
             };
             nk.push_str(&format!(
@@ -305,6 +322,15 @@ pub fn generate_nuke_script(
     nk
 }
 
+/// The Root node's colour management: OCIO with `config` (a `.ocio` path or `ocio://` URI), or
+/// Nuke's default with a linear working space.
+fn root_color(config: &Option<String>) -> String {
+    match config {
+        Some(uri) => format!(" colorManagement OCIO\n OCIO_config custom\n customOCIOConfigPath \"{}\"\n", tcl_escape(uri)),
+        None => " colorManagement Nuke\n workingSpaceLUT linear\n".to_string(),
+    }
+}
+
 /// `px` (straight linear RGBA) through `adj` as a 32-bit linear document applies it.
 fn adjusted_px(adj: &photocraft_doc::Adjustment, px: &[[f32; 4]]) -> Vec<[f32; 4]> {
     use photocraft_color::{ColorMode, SampleType};
@@ -392,7 +418,8 @@ pub fn export_multichannel_exr_with_options(
             extracted.push((layer_name, px_data));
         } else if let LayerContent::Adjustment(
             adj @ (photocraft_doc::Adjustment::Grade { .. }
-            | photocraft_doc::Adjustment::Curves { space: photocraft_doc::adjust::ToneSpace::Rgb, .. }),
+            | photocraft_doc::Adjustment::Curves { space: photocraft_doc::adjust::ToneSpace::Rgb, .. }
+            | photocraft_doc::Adjustment::OcioColorSpace { .. }),
         ) = &doc_layer.content
         {
             let raw = if doc_layer.name.trim().is_empty() { adj.label().to_string() } else { doc_layer.name.clone() };

@@ -761,7 +761,8 @@ impl<'a> Planner<'a> {
     /// adjust::apply_with on a slot (consumes it).
     fn adjust(&mut self, adj: &Adjustment, src: Slot) -> Result<Slot, Unsupported> {
         if !adjustment_on_gpu(adj, self.cx.mode) {
-            return Err(Unsupported(format!("{} on CMYK/Lab channels (evaluated on the CPU)", adj.label())));
+            let why = if matches!(adj, Adjustment::OcioColorSpace { .. }) { "OpenColorIO" } else { "on CMYK/Lab channels" };
+            return Err(Unsupported(format!("{} {why} (evaluated on the CPU)", adj.label())));
         }
         if let Adjustment::GradientMap { stops, .. } = adj {
             check_gradient_stops(stops)?;

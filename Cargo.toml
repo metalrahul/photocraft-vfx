@@ -23,6 +23,7 @@ photocraft-codecs = { path = "crates/codecs" }
 photocraft-raw = { path = "crates/raw" }
 photocraft-affinity = { path = "crates/affinity" }
 photocraft-compose = { path = "crates/compose" }
+photocraft-ocio = { path = "crates/ocio" }
 photocraft-gpu = { path = "crates/gpu" }
 photocraft-paint = { path = "crates/paint" }
 photocraft-algo = { path = "crates/algo" }
