@@ -10,6 +10,7 @@ pub struct EXRExportModalState {
     pub compression: photocraft_io::exr_export::NukeCompression,
     pub flat_beauty: bool,
     pub bit_depth_32: bool,
+    pub generate_nuke_script: bool, // <-- Added field
 }
 
 impl Default for EXRExportModalState {
@@ -19,6 +20,7 @@ impl Default for EXRExportModalState {
             compression: photocraft_io::exr_export::NukeCompression::ZipScanline,
             flat_beauty: true,
             bit_depth_32: true,
+            generate_nuke_script: true, // <-- Added default true
         }
     }
 }
@@ -118,37 +120,6 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                 buttons.push(title);
             }
 
-            // --- Nuke-Style Viewer Exposure & Gamma Toolbar Controls ---
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-
-                    ui.label("Gamma:");
-                    ui.add(egui::Slider::from_get_set(0.1..=4.0, |v| {
-                        if let Some(val) = v {
-                            app.viewer_state.controls.gamma = val as f32;
-                        }
-                        app.viewer_state.controls.gamma as f64
-                    }).speed(0.05).custom_formatter(|n, _| format!("{:.2}", n)));
-
-                    ui.separator();
-
-                    ui.label("Exp:");
-                    ui.add(egui::Slider::from_get_set(-5.0..=5.0, |v| {
-                        if let Some(val) = v {
-                            app.viewer_state.controls.exposure = val as f32;
-                        }
-                        app.viewer_state.controls.exposure as f64
-                    }).suffix(" stp").speed(0.05));
-
-                    if ui.small_button("⟲").on_hover_text("Reset Viewer Exposure & Gamma").clicked() {
-                        app.viewer_state.controls.exposure = 0.0;
-                        app.viewer_state.controls.gamma = 1.0;
-                    }
-                });
-            });
-
             edge = if rtl { buttons.iter().map(|b| b.rect.left()).fold(edge, f32::min) } else { buttons.iter().map(|b| b.rect.right()).fold(edge, f32::max) };
             if let (Some(first), Some(last)) = (buttons.first(), buttons.last()) {
                 crate::zoom_field::set_menu_bar_rect(ui.ctx(), first.rect.union(last.rect));
@@ -212,7 +183,6 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
         }
     }
 
-    // Draw open modal settings if the user clicked EXR
     if exr_state.is_open {
         let mut closed = false;
         let mut save_requested = false;
@@ -265,6 +235,11 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                     
                     ui.add_space(4.0);
                     ui.weak("Includes the current workspace layer stack with individual .R .G .B .A channels");
+                    
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut exr_state.generate_nuke_script, "Generate .nk Nuke Script alongside EXR") // <-- Added checkbox
+                        .on_hover_text("Automatically builds a Nuke node graph matching your layer blend modes.");
+                        
                     ui.add_space(12.0);
 
                     ui.horizontal(|ui| {
@@ -293,6 +268,7 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                         exr_state.compression,
                         exr_state.flat_beauty,
                         exr_state.bit_depth_32,
+                        exr_state.generate_nuke_script, // <-- Added 6th argument
                     );
                     
                     if let Err(e) = res {
@@ -308,7 +284,9 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
         }
     }
 
-    ui.ctx().data_mut(|d| d.insert_temp(exr_state_id, exr_state));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(exr_state_id, exr_state);
+    });
     edge
 }
 
