@@ -593,8 +593,8 @@ impl Session {
                 Ok(imported)
             },
             move |s, (mut r, damaged): (photocraft_io::ImportResult, bool)| {
-                // File Handling's ACEScg option, before the colour prompt looks at the profile.
-                crate::file_cmds::tag_exr_colorspace(s, &name_a, &mut r.document);
+                // File Handling's ACEScg options, before the colour prompt looks at the profile.
+                crate::file_cmds::prepare_opened(s, &name_a, &mut r.document);
                 crate::file_cmds::raw_defaults(s, &r.warnings, &mut r.document);
                 // Ask When Opening: held back until the prompt is answered (`take_held_open`). A
                 // developed raw has no embedded profile to ask about.

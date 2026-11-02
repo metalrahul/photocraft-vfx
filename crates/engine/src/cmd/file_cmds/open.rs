@@ -95,6 +95,45 @@ pub(crate) fn tag_exr_colorspace(s: &Session, name: &str, doc: &mut Document) {
     }
 }
 
+/// Colour handling for a freshly decoded file, before the open policy sees it: File Handling's
+/// EXR tagging ([`tag_exr_colorspace`]), then "Convert opened images to ACEScg"
+/// ([`convert_opened_to_aces_cg`]). Every open path (Open, Open As, background opens, Open EXR
+/// Parts) calls this.
+pub(crate) fn prepare_opened(s: &Session, name: &str, doc: &mut Document) {
+    tag_exr_colorspace(s, name, doc);
+    convert_opened_to_aces_cg(s, doc);
+}
+
+/// File Handling › "Convert opened images to ACEScg (32-bit linear)": like a Nuke Read node
+/// with its input colour space set to the file's (sRGB for a JPEG/PNG without a profile) and
+/// ACEScg as the working space. The samples are widened to 32-bit float unchanged, then the
+/// CMS converts them from the document's profile to ACEScg in one step: the tone curve is
+/// decoded to linear light, sRGB/Rec.709 primaries become AP1 and the D65 white is adapted to
+/// the ACES white (Bradford, relative colorimetric, no black point compensation, as OCIO's ACES
+/// configs do). 32-bit linear files (EXR/HDR) are converted from their linear profile, so
+/// nothing is decoded twice. Grayscale opens as RGB; CMYK, Lab, Indexed, Bitmap and Duotone
+/// documents are left as they are. A conversion error leaves the document unconverted.
+pub(crate) fn convert_opened_to_aces_cg(s: &Session, doc: &mut Document) {
+    use photocraft_color::{ColorMode, SampleType};
+    if !s.prefs.get().file_handling.open_images_as_aces_cg || !matches!(doc.mode, ColorMode::Rgb | ColorMode::Grayscale) {
+        return;
+    }
+    let aces = photocraft_cms::Builtin::AcesCg.profile();
+    let already = doc.depth == SampleType::F32
+        && doc.mode == ColorMode::Rgb
+        && doc.icc_profile.as_ref().and_then(|b| crate::color_cmds::profile_from_bytes(b).ok()).is_some_and(|p| p.same_colors(aces));
+    if already {
+        return;
+    }
+    let mut converted = doc.clone();
+    if converted.depth != SampleType::F32 {
+        crate::image_cmds::change_depth_keep_values(&mut converted, SampleType::F32);
+    }
+    if crate::color_cmds::convert_document(&mut converted, aces, photocraft_cms::Intent::RelativeColorimetric, false).is_ok() {
+        *doc = converted;
+    }
+}
+
 /// Edit › Preferences › Raw Defaults › Resolution: the ppi a raw developed on open gets, as
 /// Camera Raw's workflow options set it (the raw itself states none). `warnings` are the
 /// import's notes, which say whether the raw was developed or only its preview opened.
@@ -116,7 +155,7 @@ pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&
     };
     let r = photocraft_io::import(&decode_name, bytes).map_err(|e| EngineError::Other(format!("{decode_name}: {e}")))?;
     let mut doc = r.document;
-    tag_exr_colorspace(s, &decode_name, &mut doc);
+    prepare_opened(s, &decode_name, &mut doc);
     raw_defaults(s, &r.warnings, &mut doc);
     let path = match template_name(s, name) {
         Some(untitled) => {

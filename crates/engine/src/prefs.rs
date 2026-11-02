@@ -490,6 +490,11 @@ pub struct FileHandling {
     /// Most renderers write ACEScg EXRs without stating the colour space. With this on, an EXR
     /// that would otherwise open as linear sRGB opens as ACEScg (AP1, linear) instead.
     pub exr_aces_cg: bool,
+    /// VFX working space: every RGB or grayscale image opens converted to 32-bit linear ACEScg,
+    /// as a Nuke Read node set to its input colour space → ACEScg. The file's own profile (sRGB
+    /// when it has none) is decoded and its primaries and white point converted to AP1 / ACES
+    /// white by the CMS. Off: images open in their own space and depth.
+    pub open_images_as_aces_cg: bool,
     pub ask_before_saving_layered_tiff: bool,
     pub maximize_psd_compatibility: Ask,
     /// SVG groups deeper than this are rasterised on import; parser and document safety caps remain fixed.
@@ -522,6 +527,7 @@ impl Default for FileHandling {
             recover_on_launch: true,
             ignore_exif_profile_tag: false,
             exr_aces_cg: false,
+            open_images_as_aces_cg: false,
             ask_before_saving_layered_tiff: true,
             maximize_psd_compatibility: Ask::Always,
             rasterize_svg_groups_deeper_than: photocraft_doc::MAX_GROUP_DEPTH as u32,

@@ -41,7 +41,7 @@ pub use info::{CAMERA_FIELDS, camera_data, read_file_info, write_file_info};
 use info::{exposure_text, find_element};
 pub use open::{PLACE_EMBEDDED, open_bytes_as, place_bytes, raw_defaults};
 use open::{close_all, close_others, open_as, place, revert};
-pub(crate) use open::{import, tag_exr_colorspace};
+pub(crate) use open::{import, prepare_opened};
 use paths::is_file;
 #[cfg(test)]
 use paths::openable_name;
@@ -426,8 +426,8 @@ mod aces_exr_tests {
                 Started::Job(id) => s.wait_job(id).unwrap(),
                 Started::Done(v) => v,
             };
-            // ACEScg isn't the working space, so Ask When Opening holds it for the prompt, which
-            // names the ACEScg profile; linear sRGB (io's HDR default) opens without asking.
+            // 32-bit ACEScg, like linear sRGB (io's HDR default), now opens without the mismatch
+            // prompt; a held open (if a policy still asks) must name the ACEScg profile.
             let profile = match v.get("held").and_then(Value::as_u64) {
                 Some(held) => {
                     assert!(on, "{v}");
@@ -441,5 +441,67 @@ mod aces_exr_tests {
             };
             assert_eq!(profile.as_deref().map(|v| v.as_slice()), Some(want.as_slice()), "exr_aces_cg = {on}");
         }
+    }
+}
+
+#[cfg(test)]
+mod aces_open_tests {
+    use super::*;
+    use photocraft_color::{Color, SampleType};
+    use photocraft_doc::Size;
+
+    fn first_pixel(d: &Document) -> Vec<f32> {
+        match &d.layers[0].content {
+            LayerContent::Raster(s) => s.pixel(0, 0),
+            _ => panic!("background is not a pixel layer"),
+        }
+    }
+
+    fn srgb_doc(c: [f32; 3]) -> Document {
+        Document::with_background("t", Size::new(4, 4), ColorMode::Rgb, SampleType::U8, Color::rgba(c[0], c[1], c[2], 1.0))
+    }
+
+    /// File Handling › "Convert opened images to ACEScg": an 8-bit sRGB image becomes 32-bit
+    /// linear ACEScg, decoded and converted like a Nuke Read node (sRGB → ACEScg).
+    #[test]
+    fn open_images_as_aces_cg_converts_srgb_to_linear_ap1() {
+        let aces = photocraft_cms::Builtin::AcesCg.profile().to_bytes();
+        let grey = 128.0 / 255.0;
+
+        // Off (the default): nothing changes.
+        let s = Session::new();
+        let mut d = srgb_doc([grey; 3]);
+        prepare_opened(&s, "shot.png", &mut d);
+        assert_eq!((d.depth, d.icc_profile.is_none()), (SampleType::U8, true));
+
+        let mut s = Session::new();
+        s.prefs.edit(|p| p.file_handling.open_images_as_aces_cg = true);
+
+        // sRGB 128 grey: linear 0.2159, and still neutral after D65 → ACES white adaptation.
+        let mut d = srgb_doc([grey; 3]);
+        prepare_opened(&s, "shot.png", &mut d);
+        assert_eq!(d.depth, SampleType::F32);
+        assert_eq!(d.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
+        let p = first_pixel(&d);
+        for c in &p[..3] {
+            assert!((c - 0.2159).abs() < 2e-3, "{p:?}");
+        }
+
+        // sRGB red: AP1 is wider, so it lands well inside (≈ 0.613, 0.070, 0.021).
+        let mut d = srgb_doc([1.0, 0.0, 0.0]);
+        prepare_opened(&s, "shot.png", &mut d);
+        let p = first_pixel(&d);
+        for (got, want) in p[..3].iter().zip([0.6131, 0.0702, 0.0206]) {
+            assert!((got - want).abs() < 0.01, "{p:?}");
+        }
+
+        // Converting again is a no-op, and the open policy keeps 32-bit ACEScg without asking.
+        let before = first_pixel(&d);
+        prepare_opened(&s, "shot.png", &mut d);
+        assert_eq!(first_pixel(&d), before);
+        assert!(s.color.open_question(&d).is_none());
+        let (_, r) = s.open_document(d, None);
+        assert_eq!(r["action"].as_str(), Some("kept"), "{r}");
+        assert_eq!(s.active().unwrap().doc.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
     }
 }

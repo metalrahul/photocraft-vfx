@@ -53,7 +53,7 @@ fn open_exr_parts(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let bytes = read_file(&path)?;
     let mut r = photocraft_io::exr_parts::import(&stem(&path), &bytes, &sel).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    crate::file_cmds::tag_exr_colorspace(s, &path, &mut r.document);
+    crate::file_cmds::prepare_opened(s, &path, &mut r.document);
     let (i, color) = s.open_document(r.document, Some(path.clone()));
     Ok(json!({"document": i, "color": color, "warnings": r.warnings}))
 }

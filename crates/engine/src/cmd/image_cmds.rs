@@ -935,6 +935,18 @@ pub(crate) fn change_depth(doc: &mut Document, depth: SampleType) {
     doc.depth = depth;
 }
 
+/// Widens (or narrows) every pixel surface and channel to `depth` without touching the values:
+/// unlike [`change_depth`], tone-encoded samples stay encoded. For a colour-managed conversion
+/// that decodes the document's own tone curve afterwards (see `convert_opened_to_aces_cg`).
+pub(crate) fn change_depth_keep_values(doc: &mut Document, depth: SampleType) {
+    convert_layers_depth(&mut doc.layers, depth);
+    for ch in doc.channels.iter_mut().chain(doc.quick_mask.as_mut()) {
+        let f = ch.surface.format().with_sample(depth);
+        ch.surface = ch.surface.convert(f);
+    }
+    doc.depth = depth;
+}
+
 /// Image → Duplicate.
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
