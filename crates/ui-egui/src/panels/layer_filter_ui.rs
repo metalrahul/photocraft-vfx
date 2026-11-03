@@ -92,7 +92,7 @@ pub fn patched(current: &UiState, v: &serde_json::Value) -> Result<Filter, Strin
     if let Some(mode) = o.get("mode") {
         let name = mode.as_str().ok_or("layerFilter.mode must be a blend mode name")?;
         f.mode = photocraft_engine::commands::blend_from_str(name)
-            .filter(|m| *m == BlendMode::PassThrough || BlendMode::LAYER_MODES.contains(m))
+            .filter(|m| *m == BlendMode::PassThrough || m.is_menu_mode())
             .ok_or_else(|| format!("layerFilter.mode: unknown blend mode `{name}`"))?;
     }
     Ok(f)
@@ -149,7 +149,7 @@ pub fn bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 widgets::text_field(ui, ui.scope_id().with("layer-filter-name"), &mut app.ui.layer_filter_name, tl!("Search"), width, false);
             }
             FilterBy::Mode => {
-                let modes: Vec<(BlendMode, &str)> = std::iter::once(BlendMode::PassThrough).chain(BlendMode::LAYER_MODES).map(|m| (m, m.label())).collect();
+                let modes: Vec<(BlendMode, &str)> = std::iter::once(BlendMode::PassThrough).chain(BlendMode::menu_modes()).map(|m| (m, m.label())).collect();
                 let width = ui.available_width().max(96.0);
                 widgets::dropdown(ui, "layer-filter-mode", tl!("Mode"), &mut app.ui.layer_filter_mode, &modes, width);
             }

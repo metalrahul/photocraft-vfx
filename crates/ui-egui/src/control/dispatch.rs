@@ -399,7 +399,7 @@ fn gradient_blend_param(p: &Value) -> std::result::Result<Option<photocraft_colo
     let Some(value) = p.get("gradientBlendMode") else { return Ok(None) };
     let Some(name) = value.as_str() else { return Err("gradientBlendMode must be a blend mode name".into()) };
     photocraft_engine::commands::blend_from_str(name)
-        .filter(|m| photocraft_color::BlendMode::LAYER_MODES.contains(m))
+        .filter(|m| m.is_menu_mode())
         .map(Some)
         .ok_or_else(|| format!("unknown gradient blend mode `{name}`"))
 }

@@ -1160,7 +1160,7 @@ impl StrokeRenderer {
         // Each tile composites into a buffer of its own (a large stroke's tiles in parallel, to
         // the same pixels); the writes to the target go one by one, in order. Batches keep the
         // pending buffers few, and the pool keeps them from one composite to the next.
-        const BATCH: usize = 256;
+        const BATCH: usize = 1024;
         let mut pool = std::mem::take(&mut self.regions.0);
         // The document's CMYK profile is active per thread: the workers enter the caller's, or a
         // blend mode other than Normal would convert their tiles through the built-in coated CMYK.
@@ -1262,11 +1262,21 @@ impl StrokeRenderer {
             for_each_item(&mut items, batch.len() * (COV_TILE * COV_TILE) as usize, |item| {
                 photocraft_color::convert::with_cmyk_space(cmyk.as_ref(), || composite_tile(item))
             });
-            for (_, tr, region) in items {
-                if !tr.is_empty() {
-                    target.write_region(tr, &region);
-                    dmg = dmg.union(&tr);
+            // Many tiles (a large brush on a big 32-bit layer): written on all cores, each layer
+            // tile they land in at once. A few (a small dab): one by one, without the thread pool.
+            let written: Vec<(Rect, &[f32])> = items.iter().filter(|(_, tr, _)| !tr.is_empty()).map(|(_, tr, region)| (*tr, region.as_slice())).collect();
+            if written.len() >= 16 {
+                target.write_regions_par(&written);
+            } else {
+                for (tr, region) in &written {
+                    target.write_region(*tr, region);
                 }
+            }
+            for (tr, _) in &written {
+                dmg = dmg.union(tr);
+            }
+            drop(written);
+            for (_, _, region) in items {
                 pool.push(region);
             }
         }

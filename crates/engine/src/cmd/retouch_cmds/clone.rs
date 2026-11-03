@@ -336,7 +336,7 @@ impl LiveRetouch {
         if !old.is_empty() {
             // Back to the stroke without the previous tail.
             let (surf, _) = crate::channel_cmds::target_surface(std::sync::Arc::make_mut(&mut self.doc), self.id, &self.params)?;
-            surf.write_region(old, &self.pre_surf.read_region(old));
+            surf.copy_region_from(&self.pre_surf, old);
             self.renderer.mark_dirty(old);
             dmg = old;
         }

@@ -102,6 +102,10 @@ fn lut(row: i32, v: f32) -> f32 {
 
 const F32_MAX: f32 = 0x1.fffffep+127f;
 
+// Mode indices the shader tests by name (gpu::plan::lower::mode_index: BlendMode order).
+const M_NORMAL: i32 = 1;
+const M_DISSOLVE: i32 = 2;
+
 fn nuke_screen(a: f32, b: f32) -> f32 {
     if (a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0) { return a + b - a * b; }
     return max(a, b);
@@ -128,8 +132,48 @@ fn nuke_divide(a: f32, b: f32) -> f32 {
     return a / b;
 }
 
+// Photoshop-only modes (photocraft_color::blend::ps_color_burn / ps_color_dodge / ps_vivid_hard_mix).
+fn ps_color_burn(cb: f32, cs: f32) -> f32 {
+    if (cb >= 1.0) { return 1.0; }
+    if (cs <= 0.0) { return 0.0; }
+    return 1.0 - min((1.0 - cb) / cs, 1.0);
+}
+fn ps_color_dodge(cb: f32, cs: f32) -> f32 {
+    if (cb <= 0.0) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (1.0 - cs), 1.0);
+}
+fn ps_vivid_hard_mix(cb: f32, cs: f32) -> f32 {
+    let edge = 1e-4;
+    if (cs <= 0.5) {
+        if (cb >= 1.0 - edge) { return 1.0; }
+        if (cs <= 0.0) { return 0.0; }
+        return 1.0 - min((1.0 - cb) / (2.0 * cs), 1.0);
+    }
+    if (cb <= edge) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (2.0 * (1.0 - cs)), 1.0);
+}
+
 fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     switch mode {
+        case 34: { return max(cb + cs - 1.0, 0.0); }    // Linear Burn (PS)
+        case 37: {                                       // Vivid Light (PS)
+            if (cs <= 0.0) { return 0.0; }
+            if (cs >= 1.0) { return 1.0; }
+            if (cs <= 0.5) { return ps_color_burn(cb, 2.0 * cs); }
+            return ps_color_dodge(cb, 2.0 * (cs - 0.5));
+        }
+        case 38: { return clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); } // Linear Light (PS)
+        case 39: {                                       // Pin Light (PS)
+            if (cs <= 0.5) { return min(cb, 2.0 * cs); }
+            return max(cb, 2.0 * cs - 1.0);
+        }
+        case 40: { return select(0.0, 1.0, ps_vivid_hard_mix(cb, cs) >= 0.5 - 1e-6); } // Hard Mix (PS)
+        case 41: {                                       // Divide (PS): backdrop / source
+            if (cs <= 0.0) { return select(1.0, 0.0, cb <= 0.0); }
+            return min(cb / cs, F32_MAX);
+        }
         case 3, 7: { return min(cb, cs); }               // min / in
         case 4: { return cb * cs; }                      // multiply
         case 32: { return cb - cs; }                     // from
@@ -160,6 +204,7 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
         case 22: { return cs - cb; }                     // minus
         case 23: { return nuke_divide(cs, cb); }         // divide
         case 28: { return 0.5 * (cs + cb); }             // average
+        case 33: { return cb; }                          // atop (RGBA in composite)
         default: { return cs; }
     }
 }
@@ -194,6 +239,9 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
 fn blend_rgb(mode: i32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     let top = F32_MAX;
     switch mode {
+        case 24, 42: { return set_lum(set_sat(cs, sat(cb)), lum(cb), top); } // Hue (blend_rgb_within)
+        case 35: { return select(cb, cs, lum(cs) < lum(cb)); } // Darker Color (PS)
+        case 36: { return select(cb, cs, lum(cs) > lum(cb)); } // Lighter Color (PS)
         case 25: { return set_lum(set_sat(cb, sat(cs)), lum(cb), top); }
         case 26: { return set_lum(cs, lum(cb), top); }
         case 27: { return set_lum(cb, lum(cs), top); }
@@ -221,8 +269,8 @@ fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<
         case 1: { // over
             m = vec4(a.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
         }
-        case 2: { // copy
-            m = vec4(a.rgb, sa);
+        case 2: { // Dissolve (PS): the noise is decided by the caller (M_DISSOLVE); here plain over
+            m = vec4(a.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
         }
         case 24: { // matte
             m = vec4(a.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
@@ -362,6 +410,15 @@ fn lab_finv(t: f32) -> f32 {
 }
 fn srgb_to_lab(c: vec3<f32>) -> vec3<f32> { return c; }
 fn lab_to_srgb(lab: vec3<f32>) -> vec3<f32> { return lab; }
+
+// Dither for 8-bit output: a hash of the document pixel in 0..1.
+fn dither_noise(d: vec2<i32>) -> f32 {
+    var h = (bitcast<u32>(d.x) * 0x9E3779B1u) ^ (bitcast<u32>(d.y) * 0x85EBCA77u);
+    h = h ^ (h >> 15u);
+    h = h * 0x2C1B3C6Du;
+    h = h ^ (h >> 12u);
+    return f32(h & 0xFFFFu) / 65535.0;
+}
 
 fn dissolve_noise(d: vec2<i32>) -> f32 {
     var h = (bitcast<u32>(d.x) * 0x8da6b343u) ^ (bitcast<u32>(d.y) * 0xd8163841u) ^ 0x9e3779b9u;
@@ -1319,4 +1376,4 @@ fn fs_mbeveltex(in: VOut) -> @location(0) vec4<f32> {
 fn fs_mstroke(in: VOut) -> @location(0) vec4<f32> {
     let d = textureLoad(tex_a, local(in.pos), 0).r;
     return mout(clamp(op.p0.x + 0.5 - d, 0.0, 1.0));
-}
+}

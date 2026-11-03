@@ -441,7 +441,7 @@ fn selection_specific_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: 
             ui.spacing_mut().item_spacing.x = 8.0;
             widgets::vline(ui, 22.0);
             opt_label(ui, tl!("Mode"));
-            let opts: Vec<(BlendMode, &str)> = BlendMode::LAYER_MODES.iter().map(|m| (*m, m.label())).collect();
+            let opts: Vec<(BlendMode, &str)> = BlendMode::menu_modes().map(|m| (m, m.label())).collect();
             // The wheel over it steps the mode, as over the Layers panel's (#2061).
             widgets::dropdown_wheel_hovered(ui, "gradient-blend-mode", tl!("Blend Mode"), &mut app.ui.tool_options.gradient_blend_mode, &opts, 96.0);
             opt_label(ui, tl!("Opacity"));

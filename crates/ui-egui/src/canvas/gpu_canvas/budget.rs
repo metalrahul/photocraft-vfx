@@ -27,6 +27,27 @@ pub fn memory_budget(allowance: u64, pixels: u64, ram: Option<u64>, vram: Option
     allowance.saturating_sub(charged).min(ram / 4).min(card).max(MIN_GPU_BUDGET)
 }
 
+/// [`memory_budget`] under Rendering Mode › GPU (always): five eighths of a graphics card's own
+/// memory (`vram`), or half of physical memory (`ram`; 16 GB assumed when unknown) for an adapter
+/// that shares the system's, ignoring Memory Usage. `fixed` (GPU Memory, bytes) still wins when
+/// set, up to seven eighths of the card. Together with [`forced_canvas_budget`] it plans for the
+/// whole card; the layers that still don't fit are paged in and out on the GPU rather than
+/// redrawn on the CPU.
+pub fn forced_memory_budget(ram: Option<u64>, vram: Option<u64>, fixed: u64) -> u64 {
+    let ram = ram.unwrap_or(16 << 30);
+    if fixed > 0 {
+        return fixed.min(vram.map_or(ram / 4 * 3, |v| v / 8 * 7)).max(MIN_GPU_BUDGET);
+    }
+    vram.map_or(ram / 2, |v| v / 8 * 5).max(MIN_GPU_BUDGET)
+}
+
+/// [`canvas_budget`] under Rendering Mode › GPU (always): three eighths of a graphics card's own
+/// memory, or half of physical memory for an adapter that shares the system's (no quarter-of-RAM
+/// cap), so a large canvas keeps its GPU display textures.
+pub fn forced_canvas_budget(ram: Option<u64>, vram: Option<u64>) -> u64 {
+    vram.map_or(ram.unwrap_or(16 << 30) / 2, vram_share).max(MIN_GPU_BUDGET)
+}
+
 /// The share of a discrete GPU's memory each of [`memory_budget`] and [`canvas_budget`] may
 /// plan for: three eighths, so the two together leave a quarter of the card to the window's
 /// swapchain, egui and other applications instead of over-committing it and letting the driver

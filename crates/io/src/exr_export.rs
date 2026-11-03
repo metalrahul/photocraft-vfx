@@ -103,12 +103,13 @@ fn sanitize_layer_name(raw: &str) -> String {
 ///
 /// Photocraft's layer modes are Nuke Merge operations, and each mode's label is the Merge2
 /// `operation` name, so the script uses the same maths the canvas renders. Only pass-through
-/// (groups are flattened into the layer list, so it is plain over) and Saturation / Color /
-/// Luminosity (no Merge equivalent) fall back to over, flagged with `~` in the breakdown.
+/// (groups are flattened into the layer list, so it is plain over) and the Photoshop-only modes
+/// ([`BlendMode::PS_MODES`]: no Merge equivalent) fall back to over, flagged with `~` in the
+/// breakdown. The EXR's beauty pass still holds the true composite.
 pub fn nuke_merge_operation(mode: BlendMode) -> (&'static str, bool) {
     match mode {
         BlendMode::PassThrough => ("over", true),
-        BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => ("over", false),
+        m if m.is_photoshop_only() => ("over", false),
         m => (m.label(), true),
     }
 }
@@ -528,4 +529,4 @@ pub fn export_multichannel_exr_with_options(
 
 pub fn export_multichannel_exr(doc: &Document, path: &Path) -> std::result::Result<(), String> {
     export_multichannel_exr_with_options(doc, path, NukeCompression::ZipScanline, true, true, false)
-}
+}

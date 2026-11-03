@@ -48,8 +48,8 @@ mod texels;
 #[cfg(all(test, target_os = "linux"))]
 use budget::nvidia_video_memory;
 pub use budget::{
-    DEFER_PX, MIN_GPU_BUDGET, OVER_BUDGET, OVER_CANVAS_BUDGET, REFRESH_DEFERRED, REFRESH_OVER_BUDGET, canvas_budget, canvas_texture_bytes, memory_budget,
-    physical_memory, video_memory, vram_share,
+    DEFER_PX, MIN_GPU_BUDGET, OVER_BUDGET, OVER_CANVAS_BUDGET, REFRESH_DEFERRED, REFRESH_OVER_BUDGET, canvas_budget, canvas_texture_bytes, forced_canvas_budget,
+    forced_memory_budget, memory_budget, physical_memory, video_memory, vram_share,
 };
 #[cfg(test)]
 use budget::{NVIDIA_VENDOR, bounded_output, drm_video_memory, parse_nvidia_smi};
@@ -341,6 +341,15 @@ impl GpuCanvas {
         }
     }
 
+    /// Rendering Mode › GPU (always): keep full and large refreshes on the GPU even when their
+    /// layer pages are over the memory budget (the compositor evicts and re-uploads pages).
+    pub fn set_force_gpu(&self, on: bool) {
+        let mut r = self.rs.renderer.write();
+        if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+            res.force_gpu = on;
+        }
+    }
+
     /// The compositor's memory budget (`None` until [`GpuCanvas::set_memory_budget`]).
     pub fn memory_budget(&self) -> Option<u64> {
         let r = self.rs.renderer.read();
@@ -452,7 +461,7 @@ impl GpuCanvas {
             comp.set_memory_budget(b);
         }
         let needed = comp.working_set(doc, doc.bounds());
-        let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, true) };
+        let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, true), forced: res.force_gpu };
         res.layer_fit = Some(fit);
         Some(fit)
     }
@@ -636,7 +645,7 @@ impl GpuCanvas {
         let large = region.width() as u64 * region.height() as u64 >= DEFER_PX;
         if region == doc.bounds() || large {
             let needed = comp.working_set(doc, region);
-            let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, region == doc.bounds()) };
+            let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, region == doc.bounds()), forced: res.force_gpu };
             res.layer_fit = Some(fit);
             if !fit.fits() {
                 res.compositor = Some(comp);

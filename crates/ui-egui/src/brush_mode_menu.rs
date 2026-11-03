@@ -60,7 +60,7 @@ impl Item {
 /// The Brush's and Pencil's Mode list in the options bar's order, Behind and Clear after Dissolve:
 /// `(mode, behind)`, `(None, false)` being Clear.
 pub(crate) fn choices() -> Vec<((Option<BlendMode>, bool), &'static str)> {
-    let mut choices: Vec<_> = BlendMode::LAYER_MODES.iter().map(|m| ((Some(*m), false), m.label())).collect();
+    let mut choices: Vec<_> = BlendMode::menu_modes().map(|m| ((Some(m), false), m.label())).collect();
     let at = choices.iter().position(|o| o.0 == (Some(BlendMode::Dissolve), false)).map_or(choices.len(), |i| i + 1);
     choices.insert(at, ((None, true), "Behind"));
     choices.insert(at + 1, ((None, false), "Clear"));
@@ -68,11 +68,11 @@ pub(crate) fn choices() -> Vec<((Option<BlendMode>, bool), &'static str)> {
 }
 
 /// The blend modes in their menu groups (a separator before Darken, Lighten, Overlay, Difference
-/// and Hue), with Behind and/or Clear after Dissolve.
+/// and the Photoshop-only modes, which start at Dissolve), with Behind and/or Clear after Dissolve.
 fn blend_items(behind: bool, clear: bool) -> Vec<Item> {
     let mut out = Vec::new();
-    for m in BlendMode::LAYER_MODES {
-        if matches!(m, BlendMode::Darken | BlendMode::Lighten | BlendMode::Overlay | BlendMode::Difference | BlendMode::Hue) {
+    for m in BlendMode::menu_modes() {
+        if matches!(m, BlendMode::Darken | BlendMode::Lighten | BlendMode::Overlay | BlendMode::Difference | BlendMode::Dissolve) {
             out.push(Item::Separator);
         }
         out.push(Item::Blend(m));

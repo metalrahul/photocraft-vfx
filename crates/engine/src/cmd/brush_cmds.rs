@@ -710,7 +710,7 @@ impl LiveStroke {
                     None => {
                         // Leaving the single-pass preview: take its smoothing tail back first.
                         if !old.is_empty() {
-                            surf.write_region(old, &self.pre.read_region(old));
+                            surf.copy_region_from(&self.pre, old);
                         }
                         (photocraft_paint::UnionLive::default(), true, old)
                     }
@@ -730,7 +730,7 @@ impl LiveStroke {
             let old = std::mem::replace(&mut self.tail, Rect::EMPTY);
             if !old.is_empty() {
                 // Back to the stroke without the previous tail.
-                surf.write_region(old, &self.pre.read_region(old));
+                surf.copy_region_from(&self.pre, old);
                 self.renderer.mark_dirty(old);
                 dmg = old;
             }

@@ -527,7 +527,7 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     // next full refresh. Once per switch: the fit then names this document.
     if present && app.perf.gpu_layer_fit.is_none_or(|f| f.doc != id.0) {
         gpu_budget(app, &gpu, idx, false, visible);
-        let fit = gpu.measure_fit(&doc).unwrap_or(crate::gpu_canvas::LayerFit { doc: id.0, needed: 0, budget: 0 });
+        let fit = gpu.measure_fit(&doc).unwrap_or(crate::gpu_canvas::LayerFit { doc: id.0, ..Default::default() });
         crate::render_path::layer_fit(app, fit);
     }
     if present && current {
@@ -549,6 +549,7 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     }
     // Display textures for a canvas this large would not fit the GPU: the reduced CPU canvas
     // draws it (checked before the memory budget, which walks the history, every frame).
+    apply_force_gpu(app, &gpu);
     if !gpu.fits_canvas(&doc) {
         crate::background_redraw::cancel(app, id);
         // Drawn on the CPU canvas: no layer budget applies to it.
@@ -613,6 +614,7 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
 /// structural change, not per brush dab) and whenever either preference changes.
 fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: usize, partial: bool, visible: DRect) {
     gpu.set_focus(Some(visible));
+    let force = apply_force_gpu(app, gpu);
     let allowance = budget_allowance(app);
     let changed = app.perf.gpu_budget_allowance != allowance;
     if partial && !changed && gpu.memory_budget().is_some() {
@@ -620,13 +622,36 @@ fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: 
     }
     let Some(st) = app.session.documents().get(idx) else { return };
     let pixels = st.memory_bytes() as u64;
-    let budget = crate::gpu_canvas::memory_budget(allowance.0, pixels, crate::gpu_canvas::physical_memory(), gpu.video_memory(), allowance.1);
+    let ram = crate::gpu_canvas::physical_memory();
+    let budget = if force {
+        crate::gpu_canvas::forced_memory_budget(ram, gpu.video_memory(), allowance.1)
+    } else {
+        crate::gpu_canvas::memory_budget(allowance.0, pixels, ram, gpu.video_memory(), allowance.1)
+    };
     gpu.set_memory_budget(budget);
     app.perf.gpu_budget_mb = budget >> 20;
     app.perf.gpu_budget_allowance = allowance;
     if changed && let Some(fit) = gpu.measure_fit(&st.doc) {
         crate::render_path::layer_fit(app, fit);
     }
+}
+
+/// Rendering Mode › GPU (Preferences › Performance): stay on the GPU for large 32-bit documents
+/// and big brushes instead of redrawing on the CPU when the layers are over the memory budget.
+pub(crate) fn force_gpu(app: &PhotocraftApp) -> bool {
+    app.session.prefs().performance.effective_rendering_mode() == photocraft_engine::prefs::RenderingMode::Gpu
+}
+
+/// Tell the GPU canvas whether [`force_gpu`] is on and, when it is, widen its canvas texture
+/// budget ([`crate::gpu_canvas::forced_canvas_budget`]) so a large canvas keeps GPU textures.
+/// Automatic leaves the canvas budget the canvas started with.
+fn apply_force_gpu(app: &PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas) -> bool {
+    let force = force_gpu(app);
+    gpu.set_force_gpu(force);
+    if force {
+        gpu.set_canvas_budget(crate::gpu_canvas::forced_canvas_budget(crate::gpu_canvas::physical_memory(), gpu.video_memory()));
+    }
+    force
 }
 
 /// Memory Usage and GPU Memory (Preferences › Performance), in bytes.

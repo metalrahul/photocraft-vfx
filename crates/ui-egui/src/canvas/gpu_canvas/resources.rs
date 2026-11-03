@@ -31,6 +31,8 @@ pub(super) struct Resources {
     /// GPU memory the compositor may hold (`None`: its default), and the document area the
     /// view shows; applied before every composite.
     pub(super) compositor_budget: Option<u64>,
+    /// Rendering Mode › GPU (always): full and large refreshes stay on the GPU over budget.
+    pub(super) force_gpu: bool,
     /// The layer pages the last full (or large) refresh needed and the budget they had to fit
     /// (bytes): when they don't fit, full refreshes go to the CPU ([`OVER_BUDGET`]).
     pub(super) layer_fit: Option<LayerFit>,
@@ -362,6 +364,7 @@ impl Resources {
             compositor_failed: None,
             health: photocraft_gpu::DeviceHealth::new(),
             compositor_budget: None,
+            force_gpu: false,
             layer_fit: None,
             compositor_cache_budget: None,
             compositor_focus: None,

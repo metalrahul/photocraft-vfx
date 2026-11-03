@@ -967,7 +967,7 @@ fn blending_page(ui: &mut egui::Ui, p: &mut Value, names: &[String]) {
         let mut cur = p.get("blend").and_then(Value::as_str).unwrap_or("Normal").to_string();
         // The menu modes, plus the layer's own mode when it is a hidden one.
         let own = photocraft_color::BlendMode::HIDDEN_MODES.into_iter().find(|m| m.label() == cur);
-        let opts: Vec<(String, &str)> = photocraft_color::BlendMode::LAYER_MODES.into_iter().chain(own).map(|m| (m.label().to_string(), m.label())).collect();
+        let opts: Vec<(String, &str)> = photocraft_color::BlendMode::menu_modes().chain(own).map(|m| (m.label().to_string(), m.label())).collect();
         if widgets::dropdown(ui, "fx-blend-blendingOptions", tl!("Blend Mode"), &mut cur, &opts, 150.0) {
             p["blend"] = json!(cur);
         }
@@ -1598,7 +1598,7 @@ fn page(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>, 
                 ui.horizontal(|ui| {
                     widgets::row_label(ui, label, LABEL_W);
                     let mut cur = disp.get(key).and_then(Value::as_str).unwrap_or("Normal").to_string();
-                    let opts: Vec<(String, &str)> = photocraft_color::BlendMode::LAYER_MODES.iter().map(|m| (m.label().to_string(), m.label())).collect();
+                    let opts: Vec<(String, &str)> = photocraft_color::BlendMode::menu_modes().map(|m| (m.label().to_string(), m.label())).collect();
                     if widgets::dropdown(ui, &format!("fx-blend-{selected}-{key}"), tl!(&label), &mut cur, &opts, 150.0) {
                         let value = json!(cur);
                         disp[key] = value.clone();

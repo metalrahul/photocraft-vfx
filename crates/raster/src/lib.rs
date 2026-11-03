@@ -799,6 +799,82 @@ impl Surface {
         self.put_tiles(tiles);
     }
 
+    /// Several non-overlapping [`Surface::write_region`]s at once: the tiles they land in are
+    /// written on all cores (serially on the web), each tile un-shared once. A large brush stroke
+    /// composites thousands of small regions per frame; written one by one they were a serial
+    /// copy of the whole stroke area on a 32-bit layer. Same bytes as writing them in order.
+    ///
+    /// This enters Rayon (see [`Surface::write_region_par`]).
+    pub fn write_regions_par(&mut self, regions: &[(Rect, &[f32])]) {
+        let n = self.channels();
+        let sample = self.format.sample;
+        let mut by_tile: BTreeMap<TileCoord, Vec<usize>> = BTreeMap::new();
+        for (i, (r, data)) in regions.iter().enumerate() {
+            assert_eq!(data.len(), r.width() as usize * r.height() as usize * n, "region data length mismatch");
+            for tc in r.tiles() {
+                by_tile.entry(tc).or_default().push(i);
+            }
+        }
+        let fmt = self.format;
+        let mut blank: Option<Arc<Tile>> = None;
+        let mut work: Vec<(TileCoord, Arc<Tile>, Vec<usize>)> = by_tile
+            .into_iter()
+            .map(|(c, idx)| {
+                let t = self.tiles.remove(&c).unwrap_or_else(|| blank.get_or_insert_with(|| Arc::new(Tile::filled(&fmt, &self.default_pixel))).clone());
+                (c, t, idx)
+            })
+            .collect();
+        let write = |(c, t, idx): &mut (TileCoord, Arc<Tile>, Vec<usize>)| {
+            let tile = Arc::make_mut(t);
+            for &i in idx.iter() {
+                let (r, data) = regions[i];
+                write_tile(tile, *c, r, data, r.width() as usize, n, sample);
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            work.par_iter_mut().for_each(write);
+        }
+        #[cfg(target_arch = "wasm32")]
+        work.iter_mut().for_each(write);
+        self.put_tiles(work.into_iter().map(|(c, t, _)| (c, t)));
+    }
+
+    /// Make `r` read exactly as it does in `src` (a snapshot of this surface, same format): the
+    /// tiles wholly inside `r` are shared with `src` (no pixels copied; a later edit copies them
+    /// on write as usual), only the tiles on its edges are copied, on all cores. Same pixels as
+    /// `self.write_region(r, &src.read_region(r))`, which a live brush ran every frame to take its
+    /// previous preview back: a huge soft tip's whole footprint read and written on one core.
+    pub fn copy_region_from(&mut self, src: &Surface, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        if self.format != src.format || self.default_pixel != src.default_pixel {
+            self.write_region(r, &src.read_region(r));
+            return;
+        }
+        let mut edges = Vec::new();
+        for tc in r.tiles() {
+            let full = tc.rect();
+            if full.intersect(&r) == full {
+                match src.tiles.get(&tc) {
+                    Some(t) => {
+                        self.tiles.insert(tc, t.clone());
+                    }
+                    None => {
+                        self.tiles.remove(&tc);
+                    }
+                }
+            } else {
+                edges.push(full.intersect(&r));
+            }
+        }
+        let data: Vec<(Rect, Vec<f32>)> = edges.into_iter().map(|e| (e, src.read_region(e))).collect();
+        let regions: Vec<(Rect, &[f32])> = data.iter().map(|(e, d)| (*e, d.as_slice())).collect();
+        self.write_regions_par(&regions);
+    }
+
     /// Take the tiles covering `r` out of the surface (missing ones filled with the default
     /// pixel), so they can be edited elsewhere, e.g. in parallel: `Arc::unwrap_or_clone` copies a
     /// tile only if an undo snapshot still shares it. Give them back with [`Surface::put_tiles`].

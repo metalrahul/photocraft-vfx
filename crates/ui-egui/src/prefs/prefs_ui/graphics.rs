@@ -80,7 +80,7 @@ pub(super) fn rendering_mode_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>
     ui.horizontal(|ui| {
         ui.label(tl!("Rendering Mode"));
         let pairs =
-            vec![("auto".to_string(), tl!("Automatic (recommended)")), ("gpu".to_string(), tl!("GPU")), ("cpu".to_string(), tl!("CPU / Compatibility"))];
+            vec![("auto".to_string(), tl!("Automatic (recommended)")), ("gpu".to_string(), tl!("GPU (always)")), ("cpu".to_string(), tl!("CPU / Compatibility"))];
         let previous = current.clone();
         crate::widgets::dropdown(ui, "rendering-mode", tl!("Rendering Mode"), &mut current, &pairs, 240.0);
         if current != previous {
@@ -89,6 +89,7 @@ pub(super) fn rendering_mode_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>
         }
     });
     ui.label(tl!("Automatic uses GPU acceleration when available and falls back to CPU rendering on errors."));
+    ui.label(tl!("GPU (always) keeps large 32-bit documents and big brushes on the GPU: up to most of the graphics card's memory is used, and layers that don't fit are paged in and out on the GPU instead of redrawing on the CPU. CPU rendering is then used only if the device fails."));
     // Next to the setting, as for System Title Bar (#1677): the renderer is picked when the
     // window opens, so a change otherwise looks like it did nothing (#7939).
     ui.label(RichText::new(tl!("Applies at next launch.")).color(Tokens::get(ui.ctx()).text_dim));

@@ -155,6 +155,25 @@ fn gpu_budgets_fit_a_discrete_gpus_own_memory() {
     assert_eq!(canvas_budget(ram, Some(G)), MIN_GPU_BUDGET);
 }
 
+/// Rendering Mode › GPU (always): the budgets plan for the whole card, not Memory Usage or a
+/// quarter of RAM; a shared-memory adapter gets half of RAM. A layer fit is forced to fit.
+#[test]
+fn forced_gpu_budgets_use_the_card() {
+    const G: u64 = 1 << 30;
+    let (ram, vram) = (Some(16 * G), Some(12 * G));
+    assert_eq!(forced_memory_budget(ram, vram, 0), 15 * G / 2);
+    assert_eq!(forced_canvas_budget(ram, vram), 9 * G / 2);
+    assert!(forced_memory_budget(ram, vram, 0) + forced_canvas_budget(ram, vram) <= 12 * G, "within the card");
+    assert!(forced_memory_budget(ram, vram, 0) > memory_budget(8 * G, 0, ram, vram, 0));
+    assert_eq!(forced_memory_budget(ram, None, 0), 8 * G);
+    assert_eq!(forced_canvas_budget(ram, None), 8 * G);
+    assert_eq!(forced_memory_budget(ram, vram, 6 * G), 6 * G, "GPU Memory still sets it");
+    assert_eq!(forced_memory_budget(ram, vram, 64 * G), 21 * G / 2, "up to seven eighths of the card");
+    let over = LayerFit { doc: 1, needed: 9 * G, budget: 2 * G, forced: false };
+    assert!(!over.fits());
+    assert!(LayerFit { forced: true, ..over }.fits());
+}
+
 /// DXGI reports each adapter's dedicated memory, found by the vendor and device ids wgpu gives.
 #[cfg(windows)]
 #[test]

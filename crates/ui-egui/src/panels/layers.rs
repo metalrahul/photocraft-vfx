@@ -26,12 +26,13 @@ pub(super) fn simple_lock_toggle(background: bool, l: &Layer, targets: &Value) -
     ("layer.setProps".into(), p)
 }
 
-/// The Layers panel's blend modes: the menu's Nuke Merge colour operations, plus the layer's own
+/// The Layers panel's blend modes: the menu's Nuke Merge colour operations, then the Photoshop-only
+/// modes labelled "(PS)" ([`BlendMode::PS_MODES`]), plus the layer's own
 /// mode when it is a hidden one ([`BlendMode::HIDDEN_MODES`], e.g. from a script or older file),
 /// so the dropdown can still show it.
 pub(crate) fn blend_options(groups: bool, current: BlendMode) -> Vec<(BlendMode, &'static str)> {
     let own = Some(current).filter(|m| *m != BlendMode::PassThrough && !m.is_menu_mode());
-    std::iter::once(BlendMode::PassThrough).filter(|_| groups).chain(BlendMode::LAYER_MODES).chain(own).map(|m| (m, m.label())).collect()
+    std::iter::once(BlendMode::PassThrough).filter(|_| groups).chain(BlendMode::menu_modes()).chain(own).map(|m| (m, m.label())).collect()
 }
 
 /// Fit blend mode + Opacity into the available Layers-panel width (#2309).

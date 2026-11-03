@@ -597,6 +597,8 @@ pub struct Performance {
     /// Draw the canvas with the GPU (applies at next launch).
     pub use_gpu: bool,
     /// Explicit rendering policy. None preserves older useGpu/gpuBackend preferences.
+    /// `Gpu` (GPU, always) also keeps over-budget documents on the GPU: larger memory budgets and
+    /// no CPU redraw when the layers don't fit (see `forced_memory_budget` in ui-egui).
     pub rendering_mode: Option<RenderingMode>,
     /// Graphics backend (applies at next launch; see [`GpuBackend`]).
     pub gpu_backend: GpuBackend,

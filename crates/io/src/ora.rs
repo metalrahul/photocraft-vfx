@@ -82,19 +82,19 @@ pub(crate) fn krita_blend(id: &str) -> Option<(BlendMode, bool)> {
         "soft_light_svg" => (B::SoftLight, false),
         "diff" => (B::Difference, false),
         "exclusion" => (B::Exclusion, false),
-        "linear_burn" => (B::LinearBurn, false),
+        "linear_burn" => (B::PsLinearBurn, false),
         "linear_dodge" | "add" => (B::LinearDodge, false),
-        "subtract" => (B::Subtract, false),
-        "divide" => (B::Divide, false),
-        "vivid_light" => (B::VividLight, false),
-        "linear light" => (B::LinearLight, false),
-        "pin_light" => (B::PinLight, false),
-        "hard_mix_photoshop" => (B::HardMix, false),
+        "subtract" => (B::PaintNetColorBurn, false),
+        "divide" => (B::PsDivide, false),
+        "vivid_light" => (B::PsVividLight, false),
+        "linear light" => (B::PsLinearLight, false),
+        "pin_light" => (B::PsPinLight, false),
+        "hard_mix_photoshop" => (B::PsHardMix, false),
         // Krita's own Hard Mix thresholds differently from Photoshop's.
-        "hard mix" => (B::HardMix, true),
-        "darker color" => (B::DarkerColor, false),
-        "lighter color" => (B::LighterColor, false),
-        "hue" => (B::Hue, false),
+        "hard mix" => (B::PsHardMix, true),
+        "darker color" => (B::PsDarkerColor, false),
+        "lighter color" => (B::PsLighterColor, false),
+        "hue" => (B::PsHue, false),
         "saturation" => (B::Saturation, false),
         "color" => (B::Color, false),
         "luminize" => (B::Luminosity, false),
@@ -116,32 +116,44 @@ pub(crate) fn krita_id(mode: BlendMode) -> Option<&'static str> {
         B::Darken => "darken",
         B::Multiply => "multiply",
         B::ColorBurn => "burn",
-        B::LinearBurn => "linear_burn",
-        B::DarkerColor => "darker color",
+        B::PsLinearBurn => "linear_burn",
+        B::PsDarkerColor => "darker color",
         B::Lighten => "lighten",
         B::Screen => "screen",
         B::ColorDodge => "dodge",
         B::LinearDodge => "linear_dodge",
-        B::LighterColor => "lighter color",
+        B::PsLighterColor => "lighter color",
         B::Overlay => "overlay",
         B::SoftLight => "soft_light_svg",
         B::HardLight => "hard_light",
-        B::VividLight => "vivid_light",
-        B::LinearLight => "linear light",
-        B::PinLight => "pin_light",
-        B::HardMix => "hard_mix_photoshop",
+        B::PsVividLight => "vivid_light",
+        B::PsLinearLight => "linear light",
+        B::PsPinLight => "pin_light",
+        B::PsHardMix => "hard_mix_photoshop",
         B::Difference => "diff",
         B::Exclusion => "exclusion",
-        B::Subtract => "subtract",
-        B::Divide => "divide",
-        B::Hue => "hue",
+        B::PaintNetColorBurn => "subtract",
+        B::PsDivide => "divide",
+        B::PsHue => "hue",
         B::Saturation => "saturation",
         B::Color => "color",
         B::Luminosity => "luminize",
         B::Reflect => "reflect",
         B::Glow => "glow",
         B::Negation => "negation",
-        B::Xor | B::PaintNetColorBurn | B::PaintNetColorDodge => return None,
+        // Nuke Merge operations Krita has no composite op for.
+        B::Xor
+        | B::PaintNetColorDodge
+        | B::LinearBurn
+        | B::DarkerColor
+        | B::LighterColor
+        | B::VividLight
+        | B::LinearLight
+        | B::PinLight
+        | B::HardMix
+        | B::Subtract
+        | B::Divide
+        | B::Hue => return None,
     })
 }
 
@@ -160,7 +172,7 @@ const SVG_OPS: [(&str, BlendMode); 15] = [
     ("svg:difference", BlendMode::Difference),
     ("svg:color", BlendMode::Color),
     ("svg:luminosity", BlendMode::Luminosity),
-    ("svg:hue", BlendMode::Hue),
+    ("svg:hue", BlendMode::PsHue),
     ("svg:saturation", BlendMode::Saturation),
 ];
 
