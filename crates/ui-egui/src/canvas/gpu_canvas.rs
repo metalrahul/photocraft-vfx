@@ -49,7 +49,7 @@ mod texels;
 use budget::nvidia_video_memory;
 pub use budget::{
     DEFER_PX, MIN_GPU_BUDGET, OVER_BUDGET, OVER_CANVAS_BUDGET, REFRESH_DEFERRED, REFRESH_OVER_BUDGET, canvas_budget, canvas_texture_bytes, forced_canvas_budget,
-    forced_memory_budget, memory_budget, physical_memory, video_memory, vram_share,
+    efficient_canvas_budget, efficient_memory_budget, forced_memory_budget, memory_budget, physical_memory, profile_budgets, video_memory, vram_reserve, vram_share,
 };
 #[cfg(test)]
 use budget::{NVIDIA_VENDOR, bounded_output, drm_video_memory, parse_nvidia_smi};
@@ -91,8 +91,8 @@ const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
 /// 8-bit ones. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
-const VIEW_UNIFORM_SIZE: u64 = 128;
-const VIEW_FLOATS: usize = 32;
+const VIEW_UNIFORM_SIZE: u64 = 144;
+const VIEW_FLOATS: usize = 36;
 const TILE_UNIFORM_SIZE: u64 = 16;
 
 /// Whether this view can use the GPU canvas. Flip and non-square pixel aspect correction are
@@ -130,6 +130,9 @@ pub struct ViewParams {
     /// before the display LUT; `None` when off. The display LUT must then leave it out
     /// (`ColorState::gpu_canvas_lut`).
     pub hdr: Option<[f32; 2]>,
+    /// View › Viewer Channel (`photocraft_engine::proof_sim::ViewerChannel::code`): 0 RGB, 1 R,
+    /// 2 G, 3 B, 4 A, 5 luminance, each shown as grey. Display only.
+    pub channel: u8,
     /// Where this draw puts the document, in document pixels from its own place: `[0, 0]` for the
     /// document, a whole number of widths and heights for a View › Pattern Preview copy (#1067).
     /// A copy samples the same texture, so nothing is composited again.

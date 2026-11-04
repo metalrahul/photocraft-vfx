@@ -151,6 +151,10 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
     if let Some(id) = clicked {
         if id == "file.export.exrAces" {
             exr_state.is_open = true;
+            // A document opened from a 16-bit half EXR exports as half again by default.
+            if let Some(st) = app.session.active() {
+                exr_state.bit_depth_32 = st.doc.file_encoding.exr_half != Some(true);
+            }
         } else if id == "help.safeUpdate" {
             #[cfg(target_os = "windows")]
             let _ = std::process::Command::new("cmd")
@@ -332,4 +336,4 @@ fn switch_on_hover(ctx: &egui::Context, buttons: &[egui::Response]) {
         egui::Popup::open_id(ctx, ids[i]);
         ctx.request_repaint();
     }
-}
+}

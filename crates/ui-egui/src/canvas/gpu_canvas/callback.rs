@@ -119,6 +119,10 @@ impl CanvasCallback {
             },
             p.center[0],
             p.center[1],
+            f32::from(p.channel.min(5)),
+            0.0,
+            0.0,
+            0.0,
         ]
     }
 }

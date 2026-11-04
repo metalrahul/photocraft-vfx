@@ -286,6 +286,8 @@ fn command_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: 
         _ if crate::fill_ui::owns(fields) => crate::fill_ui::body(app, ui, fields),
         _ if crate::pattern_fill_ui::owns(fields) => crate::pattern_fill_ui::body(app, ui, fields),
         _ if crate::stroke_ui::owns(fields) => crate::stroke_ui::body(ui, fields),
+        _ if crate::depth_ui::owns(fields) => crate::depth_ui::body(ui, fields),
+        _ if crate::input_space_ui::owns(fields) => crate::input_space_ui::body(ui, fields),
         _ if crate::new_group_ui::owns(fields) => crate::new_group_ui::body(ui, fields),
         _ if crate::snapshot_dialog::owns(fields) => crate::snapshot_dialog::body(ui, fields),
         _ if crate::channel_options_ui::owns(fields) => crate::channel_options_ui::body(ui, fields),
@@ -827,6 +829,8 @@ const ROUTES: &[fn(&Fields) -> bool] = &[
     crate::fill_ui::owns,
     crate::pattern_fill_ui::owns,
     crate::stroke_ui::owns,
+    crate::depth_ui::owns,
+    crate::input_space_ui::owns,
     crate::channel_options_ui::owns,
     crate::channel_options_ui::owns_new_spot,
     crate::shape_dialog::owns,
@@ -980,6 +984,8 @@ fn confirm_command(app: &mut PhotocraftApp, d: Dialog) -> Result<Value, String> 
         _ if crate::fill_ui::owns(&d.fields) => crate::fill_ui::confirm(app, &d.fields),
         _ if crate::pattern_fill_ui::owns(&d.fields) => crate::pattern_fill_ui::confirm(app, &d.fields),
         _ if crate::stroke_ui::owns(&d.fields) => crate::stroke_ui::confirm(app, &d.fields),
+        _ if crate::depth_ui::owns(&d.fields) => crate::depth_ui::confirm(app, &d.fields),
+        _ if crate::input_space_ui::owns(&d.fields) => crate::input_space_ui::confirm(app, &d.fields),
         _ if crate::new_group_ui::owns(&d.fields) => crate::new_group_ui::confirm(app, &d.fields),
         _ if crate::snapshot_dialog::owns(&d.fields) => crate::snapshot_dialog::confirm(app, &d.fields),
         _ if crate::channel_options_ui::owns(&d.fields) => crate::channel_options_ui::confirm(app, &d.fields),
@@ -1152,6 +1158,8 @@ pub mod snapshot_dialog;
 pub(crate) mod solid_fill_ui;
 pub mod stack_dialog;
 pub mod stroke_ui;
+pub mod depth_ui;
+pub mod input_space_ui;
 pub mod targa_options_ui;
 #[cfg(test)]
 mod tests;

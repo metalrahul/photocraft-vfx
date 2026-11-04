@@ -960,6 +960,10 @@ pub struct FileEncoding {
     /// side by side; saving a stereo PNG keeps this eye-order mark (#6063).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub png_stereo: Option<u8>,
+    /// OpenEXR opened from 16-bit half-float samples: `Some(true)`. The document works in 32-bit
+    /// float (half fits it exactly, as Nuke reads it), and saving it as EXR writes half again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exr_half: Option<bool>,
 }
 
 impl FileEncoding {

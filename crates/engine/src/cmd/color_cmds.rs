@@ -217,6 +217,12 @@ pub struct ColorState {
     pub(crate) display: crate::display_color::DisplayCaches,
     /// View › 32-bit Preview Options per document.
     pub hdr: HashMap<DocId, crate::proof_sim::HdrPreview>,
+    /// View › Viewer Channel per document (Nuke-style viewer channel isolation; display only).
+    pub viewer_channel: HashMap<DocId, crate::proof_sim::ViewerChannel>,
+    /// View › OCIO Viewer per document (display only).
+    pub ocio_viewer: HashMap<DocId, crate::ocio_viewer::OcioViewer>,
+    /// Viewer LUT files used this session, newest first (the viewer bar's LUT menu).
+    pub recent_luts: Vec<String>,
 }
 
 impl ColorState {

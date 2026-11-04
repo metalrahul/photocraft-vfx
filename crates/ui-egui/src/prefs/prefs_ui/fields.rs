@@ -1,6 +1,6 @@
 use super::appearance::{AppearanceRows, appearance_rows, system_theme};
 use super::dialogs::{mismatch_body, presets_body, presets_io_body, settings_height};
-use super::graphics::{gpu_memory_lines, gpu_status_rows, memory_usage_row, read_at_launch, rendering_mode_row};
+use super::graphics::{gpu_memory_lines, gpu_status_rows, memory_usage_row, performance_mode_row, read_at_launch, rendering_mode_row};
 use super::shortcuts::shortcuts_body;
 use super::{Color32, Map, PhotocraftApp, RichText, SECTIONS, Sense, Tokens, Value, json, prefs, vec2};
 
@@ -364,7 +364,7 @@ pub(super) fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, qu
     let drawn_elsewhere = (section == "interface" && matches!(k, "theme" | "appearanceMode" | "darkTheme" | "lightTheme" | "favoriteThemes"))
         // View › Rulers (⌘R) sets it, as in Photoshop.
         || path == "unitsAndRulers.showRulers"
-        || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "gpuAdapter" | "renderingMode" | "memoryUsageMb"))
+        || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "gpuAdapter" | "renderingMode" | "performanceMode" | "memoryUsageMb"))
         // The browser presents frames itself: Low-Latency Drawing does nothing there.
         || (cfg!(target_arch = "wasm32") && path == "performance.lowLatencyDrawing")
         || (section == "export" && !export_field_visible(obj, k))
@@ -395,6 +395,9 @@ pub(super) fn section_fields(
     }
     if section == "performance" && (query.is_empty() || preference_matches(section, "renderingMode", &query)) {
         rendering_mode_row(ui, obj);
+    }
+    if section == "performance" && (query.is_empty() || preference_matches(section, "performanceMode", &query)) {
+        performance_mode_row(ui, obj);
     }
     if section == "performance" && (query.is_empty() || preference_matches(section, "memoryUsageMb", &query)) {
         memory_usage_row(ui, obj);

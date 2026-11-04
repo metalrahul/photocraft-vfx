@@ -155,20 +155,27 @@ fn gpu_budgets_fit_a_discrete_gpus_own_memory() {
     assert_eq!(canvas_budget(ram, Some(G)), MIN_GPU_BUDGET);
 }
 
-/// Rendering Mode › GPU (always): the budgets plan for the whole card, not Memory Usage or a
-/// quarter of RAM; a shared-memory adapter gets half of RAM. A layer fit is forced to fit.
+/// Performance Mode › Maximum (and Rendering Mode › GPU (always)): the budgets plan for the card
+/// less a reserve of at least 2.5 GB, not Memory Usage or a quarter of RAM, and never the whole
+/// card (a 16 GB card ran out of memory at 5/8 + 3/8); a shared-memory adapter gets half of RAM
+/// in all. A layer fit is forced to fit.
 #[test]
 fn forced_gpu_budgets_use_the_card() {
     const G: u64 = 1 << 30;
-    let (ram, vram) = (Some(16 * G), Some(12 * G));
-    assert_eq!(forced_memory_budget(ram, vram, 0), 15 * G / 2);
-    assert_eq!(forced_canvas_budget(ram, vram), 9 * G / 2);
-    assert!(forced_memory_budget(ram, vram, 0) + forced_canvas_budget(ram, vram) <= 12 * G, "within the card");
+    let (ram, vram) = (Some(16 * G), Some(16 * G));
+    assert_eq!(vram_reserve(16 * G), 5 * G / 2);
+    assert_eq!(vram_reserve(24 * G), 3 * G);
+    assert_eq!(vram_reserve(4 * G), 2 * G, "at most half a small card");
+    let total = forced_memory_budget(ram, vram, 0) + forced_canvas_budget(ram, vram);
+    assert!(total <= 16 * G - 5 * G / 2, "the reserve stays free: {total}");
+    assert!(total >= 13 * G, "most of the card: {total}");
     assert!(forced_memory_budget(ram, vram, 0) > memory_budget(8 * G, 0, ram, vram, 0));
-    assert_eq!(forced_memory_budget(ram, None, 0), 8 * G);
-    assert_eq!(forced_canvas_budget(ram, None), 8 * G);
+    let big = Some(24 * G);
+    assert!(forced_memory_budget(ram, big, 0) + forced_canvas_budget(ram, big) <= 21 * G);
+    assert!(forced_memory_budget(ram, big, 0) >= 13 * G, "24 GB cards take most of it");
+    assert_eq!(forced_memory_budget(ram, None, 0) + forced_canvas_budget(ram, None), 8 * G, "half of RAM in all");
     assert_eq!(forced_memory_budget(ram, vram, 6 * G), 6 * G, "GPU Memory still sets it");
-    assert_eq!(forced_memory_budget(ram, vram, 64 * G), 21 * G / 2, "up to seven eighths of the card");
+    assert_eq!(forced_memory_budget(ram, vram, 64 * G), 27 * G / 2, "up to the card less its reserve");
     let over = LayerFit { doc: 1, needed: 9 * G, budget: 2 * G, forced: false };
     assert!(!over.fits());
     assert!(LayerFit { forced: true, ..over }.fits());
@@ -349,8 +356,8 @@ fn canvas_texture_bytes_price_every_tile_and_mip_level() {
 
 #[test]
 fn view_uniform_packs_rotation() {
-    assert_eq!(VIEW_FLOATS, 32);
-    assert_eq!(VIEW_UNIFORM_SIZE, 128);
+    assert_eq!(VIEW_FLOATS, 36);
+    assert_eq!(VIEW_UNIFORM_SIZE, 144);
     assert_eq!(VIEW_FLOATS * 4, VIEW_UNIFORM_SIZE as usize);
     assert!(gpu_view_ok(false, 0.0, 1.0));
     assert!(gpu_view_ok(false, 45.0_f32.to_radians(), 1.0));
@@ -415,4 +422,23 @@ fn shaders_validate() {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
     }
+}
+
+/// Performance Mode: Efficient leaves half the card free, Balanced is the automatic budget, and
+/// Maximum the most; each out-of-memory error takes a quarter off, down to a quarter.
+#[test]
+fn performance_modes_scale_the_budgets() {
+    use photocraft_engine::prefs::PerformanceMode as M;
+    const G: u64 = 1 << 30;
+    let (ram, vram) = (Some(32 * G), Some(16 * G));
+    let b = |m, oom| profile_budgets(m, 64 * G, 0, ram, vram, 0, oom);
+    let (e, n, x) = (b(M::Efficient, 0), b(M::Balanced, 0), b(M::Maximum, 0));
+    assert_eq!(e, (4 * G, 4 * G));
+    assert_eq!(e, (efficient_memory_budget(64 * G, 0, ram, vram, 0), efficient_canvas_budget(ram, vram)));
+    assert_eq!(n, (memory_budget(64 * G, 0, ram, vram, 0), canvas_budget(ram, vram)));
+    assert!(e.0 + e.1 < n.0 + n.1 && n.0 + n.1 < x.0 + x.1);
+    assert!(x.0 + x.1 <= 16 * G - vram_reserve(16 * G));
+    assert_eq!(b(M::Maximum, 1).0, x.0 / 4 * 3);
+    assert_eq!(b(M::Maximum, 9).0, x.0 / 4);
+    assert_eq!(profile_budgets(M::Efficient, 0, 0, ram, Some(G), 0, 3), (MIN_GPU_BUDGET, MIN_GPU_BUDGET));
 }

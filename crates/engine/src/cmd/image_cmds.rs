@@ -899,17 +899,149 @@ fn convert_mode(s: &mut Session, mode: ColorMode, p: &Value) -> Result<Value> {
 }
 
 /// Image → Mode → 8/16/32 Bits/Channel.
-fn convert_depth(s: &mut Session, depth: SampleType) -> Result<Value> {
+fn convert_depth(s: &mut Session, depth: SampleType, p: &Value) -> Result<Value> {
     let current = s.active().ok_or(EngineError::NoDocument)?.doc.depth;
     if current == depth {
         // History::record clears redo even when an edit closure leaves the document unchanged.
         return Ok(Value::Null);
     }
+    let method = NarrowMethod::from_params(p)?;
     s.edit("Bit Depth", |doc, _| {
-        change_depth(doc, depth);
+        convert_depth_keeping_look(doc, depth, method);
         Ok(())
     })?;
     Ok(Value::Null)
+}
+
+/// How Image › Mode › 8/16 Bits/Channel brings a 32-bit document's linear light into integer
+/// samples (the role of Photoshop's HDR Toning on 32 → 16/8). Every method keeps the look of
+/// values up to 1.0; they differ in what happens above it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NarrowMethod {
+    /// Encode through the sRGB curve, values above 1.0 clipped (the default).
+    Clip,
+    /// Exposure (stops) and gamma applied in linear light first, then as [`NarrowMethod::Clip`].
+    ExposureGamma { exposure: f32, gamma: f32 },
+    /// Values above [`HIGHLIGHT_KNEE`] rolled off smoothly towards 1.0, keeping hue, then encoded.
+    HighlightCompression,
+    /// Keep the samples linear and the linear profile (16-bit, linear RGB profiles only): nothing
+    /// changes below 1.0. Elsewhere it is [`NarrowMethod::Clip`].
+    KeepLinear,
+}
+
+/// Where [`NarrowMethod::HighlightCompression`] starts bending (linear light).
+pub const HIGHLIGHT_KNEE: f32 = 0.8;
+
+impl NarrowMethod {
+    /// `{"method": "clip|exposureGamma|highlightCompression|keepLinear", "exposure", "gamma"}`.
+    pub fn from_params(p: &Value) -> Result<Self> {
+        let num = |k: &str, d: f32| p.get(k).and_then(Value::as_f64).map_or(d, |v| v as f32);
+        Ok(match p.get("method").and_then(Value::as_str).unwrap_or("clip") {
+            "clip" => NarrowMethod::Clip,
+            "exposureGamma" => {
+                let (exposure, gamma) = (num("exposure", 0.0), num("gamma", 1.0));
+                if !exposure.is_finite() || !(-20.0..=20.0).contains(&exposure) || !gamma.is_finite() || !(0.1..=10.0).contains(&gamma) {
+                    return Err(EngineError::Other("exposure must be -20..20 stops and gamma 0.1..10".into()));
+                }
+                NarrowMethod::ExposureGamma { exposure, gamma }
+            }
+            "highlightCompression" => NarrowMethod::HighlightCompression,
+            "keepLinear" => NarrowMethod::KeepLinear,
+            other => return Err(EngineError::Other(format!("unknown method `{other}` (clip, exposureGamma, highlightCompression, keepLinear)"))),
+        })
+    }
+}
+
+/// `c` with its brightest channel above [`HIGHLIGHT_KNEE`] rolled off towards 1.0 (an
+/// exponential shoulder with slope 1 at the knee), all channels scaled alike so hue is kept.
+pub fn compress_highlights(c: [f32; 3]) -> [f32; 3] {
+    let m = c[0].max(c[1]).max(c[2]);
+    if m.is_nan() || m <= HIGHLIGHT_KNEE {
+        return c;
+    }
+    if m.is_infinite() {
+        return [1.0; 3];
+    }
+    let span = 1.0 - HIGHLIGHT_KNEE;
+    let to = HIGHLIGHT_KNEE + span * (1.0 - (-(m - HIGHLIGHT_KNEE) / span).exp());
+    let k = to / m;
+    [c[0] * k, c[1] * k, c[2] * k]
+}
+
+/// What `method` makes of linear-light `c` before integer samples clip it at 1.0: the
+/// conversion's tone step, shared by the conversion and the dialog's preview.
+pub fn narrow_linear(method: NarrowMethod, c: [f32; 3]) -> [f32; 3] {
+    match method {
+        NarrowMethod::ExposureGamma { exposure, gamma } => {
+            let (k, inv) = (2f32.powf(exposure), 1.0 / gamma);
+            c.map(|v| {
+                let x = v * k;
+                if x > 0.0 { x.powf(inv) } else { x }
+            })
+        }
+        NarrowMethod::HighlightCompression => compress_highlights(c),
+        NarrowMethod::Clip | NarrowMethod::KeepLinear => c,
+    }
+}
+
+/// Is `p` an RGB matrix/TRC profile with linear curves (Linear sRGB, ACEScg…)?
+pub fn is_linear_rgb_profile(p: &photocraft_cms::Profile) -> bool {
+    p.color_space == photocraft_cms::ColorSpace::Rgb && p.is_matrix_shaper() && p.trc.as_ref().is_some_and(|t| t.iter().all(photocraft_cms::Curve::is_identity))
+}
+
+/// `p`'s primaries with `curve` (the sRGB curve or linear), named after it.
+fn tone_twin(p: &photocraft_cms::Profile, curve: photocraft_cms::Curve, to_linear: bool) -> photocraft_cms::Profile {
+    let mut q = p.clone();
+    q.trc = Some([curve.clone(), curve.clone(), curve]);
+    let base = p.description.trim_end_matches(" (sRGB curve)").trim_end_matches(" (linear)").to_string();
+    q.description = if to_linear { format!("{base} (linear)") } else { format!("{base} (sRGB curve)") };
+    q.with_encoded_bytes()
+}
+
+/// [`change_depth`] as Image › Mode runs it, keeping how the image looks across 32 bits:
+///
+/// * 32 → 16/8 with a linear RGB profile: the pixels are sRGB-encoded (as before) and the profile
+///   becomes the same primaries with the sRGB curve, so the display reads them back as the same
+///   colours. (Keeping the linear profile on encoded pixels is what shifted the gamma.) `method`
+///   decides values above 1.0; [`NarrowMethod::KeepLinear`] keeps both pixels and profile linear.
+/// * 8/16 → 32 with a gamma-encoded RGB matrix profile: the pixels are linearised (as before) and
+///   the profile becomes its linear twin, which is how 32-bit documents are shown.
+///
+/// Grayscale, CMYK, Lab and LUT-based profiles convert as [`change_depth`] does.
+pub fn convert_depth_keeping_look(doc: &mut Document, depth: SampleType, method: NarrowMethod) {
+    use photocraft_cms::{Builtin, Curve};
+    let from = doc.depth;
+    let rgb = doc.mode == ColorMode::Rgb;
+    let profile = crate::color_cmds::document_profile(doc);
+    let linear = rgb && is_linear_rgb_profile(&profile);
+    if from == SampleType::F32 && depth != SampleType::F32 {
+        if !matches!(method, NarrowMethod::Clip | NarrowMethod::KeepLinear) {
+            if doc.mode == ColorMode::Rgb {
+                for_each_surface(&mut doc.layers, false, &mut |surf, _| surf.map_rgb(|c| narrow_linear(method, c)));
+            } else if let NarrowMethod::ExposureGamma { .. } = method {
+                // Grayscale: one channel, the same curve.
+                for_each_surface(&mut doc.layers, false, &mut |surf, _| surf.map_color(|v| narrow_linear(method, [v; 3])[0]));
+            }
+        }
+        if method == NarrowMethod::KeepLinear && linear && depth == SampleType::U16 {
+            // Integer samples clamp to 0..1 as they are written.
+            change_depth_keep_values(doc, depth);
+            return;
+        }
+        change_depth(doc, depth);
+        if linear {
+            let encoded =
+                if profile.same_colors(Builtin::LinearSrgb.profile()) { Builtin::Srgb.profile().clone() } else { tone_twin(&profile, photocraft_cms::curve::srgb_trc(), false) };
+            doc.icc_profile = Some(encoded.to_bytes());
+        }
+        return;
+    }
+    let gamma_matrix = rgb && !linear && profile.is_matrix_shaper() && profile.trc.is_some();
+    change_depth(doc, depth);
+    if depth == SampleType::F32 && from != SampleType::F32 && gamma_matrix {
+        let lin = if profile.same_colors(Builtin::Srgb.profile()) { Builtin::LinearSrgb.profile().clone() } else { tone_twin(&profile, Curve::Identity, true) };
+        doc.icc_profile = Some(lin.to_bytes());
+    }
 }
 
 pub(crate) fn change_depth(doc: &mut Document, depth: SampleType) {
@@ -1055,9 +1187,30 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             |s, p| convert_mode(s, ColorMode::Lab, p)
         ),
-        spec!("image.mode.bits8", "8 Bits/Channel", ["Image", "Mode"], "{}", has_doc, |s, _| convert_depth(s, SampleType::U8)),
-        spec!("image.mode.bits16", "16 Bits/Channel", ["Image", "Mode"], "{}", has_doc, |s, _| convert_depth(s, SampleType::U16)),
-        spec!("image.mode.bits32", "32 Bits/Channel", ["Image", "Mode"], "{}", has_doc, |s, _| convert_depth(s, SampleType::F32)),
+        spec!(
+            "image.mode.bits8",
+            "8 Bits/Channel",
+            ["Image", "Mode"],
+            r##"{"method":"clip|exposureGamma|highlightCompression"="clip","exposure":-20..20=0,"gamma":0.1..10=1} (from 32 bits: how values above 1.0 are brought in; the profile becomes its sRGB-curve twin so the look is kept)"##,
+            has_doc,
+            |s, p| convert_depth(s, SampleType::U8, p)
+        ),
+        spec!(
+            "image.mode.bits16",
+            "16 Bits/Channel",
+            ["Image", "Mode"],
+            r##"{"method":"clip|exposureGamma|highlightCompression|keepLinear"="clip","exposure":-20..20=0,"gamma":0.1..10=1} (from 32 bits: how values above 1.0 are brought in; the profile becomes its sRGB-curve twin so the look is kept, or with keepLinear stays linear)"##,
+            has_doc,
+            |s, p| convert_depth(s, SampleType::U16, p)
+        ),
+        spec!(
+            "image.mode.bits32",
+            "32 Bits/Channel",
+            ["Image", "Mode"],
+            r##"{} (the pixels are linearised and an RGB profile becomes its linear twin, so the look is kept)"##,
+            has_doc,
+            |s, p| convert_depth(s, SampleType::F32, p)
+        ),
         spec!("image.duplicate", "Duplicate…", ["Image"], r##"{"name":str,"mergedOnly":bool=false}"##, has_doc, duplicate),
     ]
 }

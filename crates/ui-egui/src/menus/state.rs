@@ -156,6 +156,14 @@ pub(super) fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
         let pv = app.session.color.proof(d.doc.id);
         return Some(if id == "view.proofColors" { pv.enabled } else { pv.gamut_warning });
     }
+    if id == "view.ocioViewer.toggle" {
+        let Some(d) = app.session.active() else { return Some(false) };
+        return Some(app.session.color.ocio_viewer(d.doc.id).enabled);
+    }
+    if let Some(c) = id.strip_prefix("view.viewerChannel.") {
+        let Some(d) = app.session.active() else { return Some(false) };
+        return Some(app.session.color.viewer_channel(d.doc.id).id() == c);
+    }
     if id.starts_with("window.workspace.") && id != "window.workspace.resetWorkspace" {
         let want = workspace_name(id)?;
         return Some(app.ui.workspace == if want.is_empty() { "Essentials" } else { want });

@@ -254,6 +254,7 @@ fn compare_display_paths_24mp() {
         display: 1,
         output: 1,
         hdr: None,
+        channel: 0,
         offset: [0.0, 0.0],
     };
     let mut harness =

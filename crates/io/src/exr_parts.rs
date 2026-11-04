@@ -266,7 +266,7 @@ pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult,
         return Err(IoError::Unsupported("nothing imported".into()));
     }
     if f16_seen {
-        warnings.push("16-bit float samples are stored as 32-bit float".to_string());
+        warnings.push("16-bit half-float samples open as 32-bit float (no loss); saving as EXR writes 16-bit half again".to_string());
     }
     let mode = if gray_only { ColorMode::Grayscale } else { ColorMode::Rgb };
     let mut doc = Document::new(name, Size::new(max.0, max.1), mode, DocSample::F32);
@@ -274,6 +274,9 @@ pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult,
     // OpenEXR holds linear, scene-referred values (Y is linear luminance): use the profile
     // matching the selected parts' mode, as File › Open does.
     doc.icc_profile = Some(if gray_only { photocraft_cms::builtin::linear_gray().to_bytes() } else { Builtin::LinearSrgb.profile().to_bytes() });
+    if f16_seen {
+        doc.file_encoding.exr_half = Some(true);
+    }
     Ok(ImportResult { document: doc, warnings, source_read_only: false, preview_only: false })
 }
 

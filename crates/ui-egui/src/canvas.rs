@@ -402,6 +402,7 @@ fn paint_canvas(app: &mut PhotocraftApp, ui: &egui::Ui, view: &View, xf: ViewXfo
             display: sync_display_lut(app, &shown, key, output),
             output: output.unwrap_or(0),
             hdr: hdr_preview(app, doc),
+            channel: app.session.color.viewer_channel(doc.id).code(),
             offset: [0.0, 0.0],
         };
         paint_gpu_view(painter, rect, params, &pattern);
@@ -424,6 +425,7 @@ fn paint_canvas(app: &mut PhotocraftApp, ui: &egui::Ui, view: &View, xf: ViewXfo
             display: sync_display_lut(app, doc, doc.id.0, output),
             output: output.unwrap_or(0),
             hdr: hdr_preview(app, doc),
+            channel: app.session.color.viewer_channel(doc.id).code(),
             offset: [0.0, 0.0],
         };
         if app.navigator_plain.contains(&doc.id) {

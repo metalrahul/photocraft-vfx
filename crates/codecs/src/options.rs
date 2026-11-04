@@ -311,6 +311,9 @@ pub struct EncodeOptions {
     /// only when it could pass the 4 GiB a classic TIFF can address.
     pub tiff_bigtiff: bool,
     pub exr_compression: ExrCompression,
+    /// OpenEXR: write 32-bit float images as 16-bit half float (a document opened from a half
+    /// EXR saves back as one). Images already in half float are written as half regardless.
+    pub exr_half: bool,
     /// DPX bits per sample. `None` follows the image: 8 for 8-bit, 16 otherwise.
     pub dpx_bits: Option<DpxBits>,
     /// DDS compression and mip chain.
@@ -335,6 +338,7 @@ impl Default for EncodeOptions {
             tiff_compression: TiffCompression::None,
             tiff_bigtiff: false,
             exr_compression: ExrCompression::Zip16,
+            exr_half: false,
             dpx_bits: None,
             dds: DdsOptions::default(),
             embed_icc: true,

@@ -290,7 +290,8 @@ pub(crate) fn decode_channels(bytes: &[u8], index: usize, names: &[&str], limits
 }
 
 pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError> {
-    let img = src.converted(plan.layout, plan.sample);
+    let sample = if opts.exr_half && plan.sample == SampleType::F32 { SampleType::F16 } else { plan.sample };
+    let img = src.converted(plan.layout, sample);
     let (w, h) = (img.width() as usize, img.height() as usize);
     let layout = img.layout();
     let names: &[&str] = match layout {

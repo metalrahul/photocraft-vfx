@@ -38,6 +38,9 @@ pub fn import_flat(name: &str, bytes: &[u8]) -> Result<ImportResult, IoError> {
         r.document.color_table = Some(photocraft_doc::ColorTable { colors, transparent });
     }
     r.document.file_encoding = file_encoding_as(format, bytes);
+    if format == Some(Format::OpenExr) && img.sample_type() == CSample::F16 {
+        r.document.file_encoding.exr_half = Some(true);
+    }
     if format == Some(Format::Tga) && img.layout() == ChannelLayout::Rgba {
         tga_alpha_to_channel(&mut r.document)?;
     }
@@ -155,6 +158,9 @@ pub fn apply_file_encoding(doc: &Document, opts: &mut codecs::EncodeOptions) {
         opts.webp_quality = q.min(100);
     }
     opts.png_stereo = e.png_stereo.and_then(codecs::PngStereo::from_mode);
+    if e.exr_half == Some(true) {
+        opts.exr_half = true;
+    }
 }
 
 /// Photoshop opens a 32-bit Targa as an opaque Background plus an "Alpha 1" channel holding the
@@ -358,7 +364,7 @@ fn document_format(layout: ChannelLayout, sample: CSample) -> DocumentFormat {
     let (depth, sample, warning) = match sample {
         CSample::U8 => (SampleType::U8, CSample::U8, None),
         CSample::U16 => (SampleType::U16, CSample::U16, None),
-        CSample::F16 => (SampleType::F32, CSample::F32, Some("16-bit float samples are stored as 32-bit float".to_string())),
+        CSample::F16 => (SampleType::F32, CSample::F32, Some("16-bit half-float samples open as 32-bit float (no loss); saving as EXR writes 16-bit half again".to_string())),
         CSample::F32 => (SampleType::F32, CSample::F32, None),
     };
     DocumentFormat { mode, depth, layout, sample, warning }

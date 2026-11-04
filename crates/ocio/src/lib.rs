@@ -43,12 +43,22 @@ pub struct ColorSpace {
     pub family: String,
 }
 
+/// One display of a config and its views (the viewer's Display and View menus).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Display {
+    pub name: String,
+    pub views: Vec<String>,
+}
+
 /// A loaded OCIO config (thread-safe; processors are cached per colour-space pair).
 pub struct Config {
     raw: imp::RawConfig,
     uri: String,
     name: String,
     spaces: Vec<ColorSpace>,
+    displays: Vec<Display>,
+    default_display: String,
+    looks: Vec<String>,
     procs: Mutex<HashMap<(String, String), Arc<Processor>>>,
 }
 
@@ -74,7 +84,66 @@ impl Config {
 
     fn new(raw: imp::RawConfig, uri: &str) -> Config {
         let (name, spaces) = raw.describe();
-        Config { raw, uri: uri.to_string(), name, spaces, procs: Mutex::new(HashMap::new()) }
+        let (displays, default_display, looks) = raw.viewers();
+        Config { raw, uri: uri.to_string(), name, spaces, displays, default_display, looks, procs: Mutex::new(HashMap::new()) }
+    }
+
+    /// Its displays with their views, in config order.
+    pub fn displays(&self) -> &[Display] {
+        &self.displays
+    }
+
+    /// The config's default display (its first when it names none).
+    pub fn default_display(&self) -> Option<&str> {
+        self.displays.iter().find(|d| d.name == self.default_display).or(self.displays.first()).map(|d| d.name.as_str())
+    }
+
+    /// `display`'s views, in config order (its first is the default).
+    pub fn views(&self, display: &str) -> &[String] {
+        self.displays.iter().find(|d| d.name == display).map_or(&[], |d| d.views.as_slice())
+    }
+
+    /// The config's looks.
+    pub fn looks(&self) -> &[String] {
+        &self.looks
+    }
+
+    /// A LUT file as a viewer process: `src` → `lut_space` → the LUT, then (with `then_view`) back
+    /// to `src` and through that display / view, else the LUT's output as display values. Any
+    /// format OCIO's FileTransform reads (.cube, .3dl, .csp, .spi1d/.spi3d, .clf, .cdl …). Cached.
+    pub fn lut_processor(&self, src: &str, lut: &str, lut_space: &str, then_view: Option<(&str, &str)>) -> Result<Arc<Processor>, String> {
+        let (display, view) = then_view.unwrap_or(("", ""));
+        let key = (src.to_string(), format!("\u{0}lut\u{0}{lut}\u{0}{lut_space}\u{0}{display}\u{0}{view}"));
+        if let Some(p) = self.procs.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return Ok(p.clone());
+        }
+        let p = Arc::new(Processor { raw: self.raw.lut_processor(src, lut, lut_space, display, view)? });
+        self.procs.lock().unwrap_or_else(|e| e.into_inner()).insert(key, p.clone());
+        Ok(p)
+    }
+
+    /// The viewer process: colour space `src` through `display` / `view` (as Nuke's viewer), with
+    /// `look` overriding the view's own looks when given. Cached.
+    pub fn display_view_processor(&self, src: &str, display: &str, view: &str, look: Option<&str>) -> Result<Arc<Processor>, String> {
+        let key = (src.to_string(), format!("\u{0}viewer\u{0}{display}\u{0}{view}\u{0}{}", look.unwrap_or("")));
+        if let Some(p) = self.procs.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return Ok(p.clone());
+        }
+        let p = Arc::new(Processor { raw: self.raw.display_view_processor(src, display, view, look.unwrap_or(""))? });
+        self.procs.lock().unwrap_or_else(|e| e.into_inner()).insert(key, p.clone());
+        Ok(p)
+    }
+
+    /// The viewer process inverted: `display` / `view` code values back to colour space `dst`
+    /// (display-referred pixels taken out of the view they will be shown through). Cached.
+    pub fn inverse_view_processor(&self, dst: &str, display: &str, view: &str) -> Result<Arc<Processor>, String> {
+        let key = (dst.to_string(), format!("\u{0}inverse\u{0}{display}\u{0}{view}"));
+        if let Some(p) = self.procs.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return Ok(p.clone());
+        }
+        let p = Arc::new(Processor { raw: self.raw.inverse_view_processor(dst, display, view)? });
+        self.procs.lock().unwrap_or_else(|e| e.into_inner()).insert(key, p.clone());
+        Ok(p)
     }
 
     /// Where the config came from (file path or `ocio://` URI).
@@ -193,6 +262,40 @@ mod imp {
         fn pc_ocio_colorspace_family(c: *const PcConfig, i: c_int) -> *const c_char;
         fn pc_ocio_role(c: *const PcConfig, role: *const c_char) -> *const c_char;
         fn pc_ocio_processor(c: *const PcConfig, src: *const c_char, dst: *const c_char, err: *mut c_char, err_len: usize) -> *mut PcProc;
+        fn pc_ocio_display_count(c: *const PcConfig) -> c_int;
+        fn pc_ocio_display_name(c: *const PcConfig, d: c_int) -> *const c_char;
+        fn pc_ocio_view_count(c: *const PcConfig, d: c_int) -> c_int;
+        fn pc_ocio_view_name(c: *const PcConfig, d: c_int, v: c_int) -> *const c_char;
+        fn pc_ocio_default_display(c: *const PcConfig) -> *const c_char;
+        fn pc_ocio_look_count(c: *const PcConfig) -> c_int;
+        fn pc_ocio_look_name(c: *const PcConfig, i: c_int) -> *const c_char;
+        fn pc_ocio_display_view_processor(
+            c: *const PcConfig,
+            src: *const c_char,
+            display: *const c_char,
+            view: *const c_char,
+            look: *const c_char,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> *mut PcProc;
+        fn pc_ocio_inverse_view_processor(
+            c: *const PcConfig,
+            dst: *const c_char,
+            display: *const c_char,
+            view: *const c_char,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> *mut PcProc;
+        fn pc_ocio_lut_processor(
+            c: *const PcConfig,
+            src: *const c_char,
+            lut: *const c_char,
+            lut_space: *const c_char,
+            display: *const c_char,
+            view: *const c_char,
+            err: *mut c_char,
+            err_len: usize,
+        ) -> *mut PcProc;
         fn pc_ocio_proc_is_noop(p: *const PcProc) -> c_int;
         fn pc_ocio_proc_apply_rgba(p: *const PcProc, data: *mut f32, width: c_long, height: c_long);
         fn pc_ocio_proc_free(p: *mut PcProc);
@@ -255,6 +358,47 @@ mod imp {
                     .collect();
                 (name, spaces)
             }
+        }
+
+        pub fn viewers(&self) -> (Vec<super::Display>, String, Vec<String>) {
+            // SAFETY: self.0 is a live config; indices are within its counts.
+            unsafe {
+                let nd = pc_ocio_display_count(self.0);
+                let displays = (0..nd)
+                    .filter_map(|d| {
+                        let name = text(pc_ocio_display_name(self.0, d))?;
+                        let views = (0..pc_ocio_view_count(self.0, d)).filter_map(|v| text(pc_ocio_view_name(self.0, d, v))).collect();
+                        Some(super::Display { name, views })
+                    })
+                    .collect();
+                let default = text(pc_ocio_default_display(self.0)).unwrap_or_default();
+                let looks = (0..pc_ocio_look_count(self.0)).filter_map(|i| text(pc_ocio_look_name(self.0, i))).collect();
+                (displays, default, looks)
+            }
+        }
+
+        pub fn display_view_processor(&self, src: &str, display: &str, view: &str, look: &str) -> Result<RawProcessor, String> {
+            let (s, d, v, l) = (c_str(src)?, c_str(display)?, c_str(view)?, c_str(look)?);
+            let mut buf = vec![0u8; ERR_LEN];
+            // SAFETY: live config, valid C strings, error buffer of ERR_LEN bytes.
+            let p = unsafe { pc_ocio_display_view_processor(self.0, s.as_ptr(), d.as_ptr(), v.as_ptr(), l.as_ptr(), buf.as_mut_ptr().cast(), ERR_LEN) };
+            if p.is_null() { Err(error(&buf)) } else { Ok(RawProcessor(p)) }
+        }
+
+        pub fn inverse_view_processor(&self, dst: &str, display: &str, view: &str) -> Result<RawProcessor, String> {
+            let (s, d, v) = (c_str(dst)?, c_str(display)?, c_str(view)?);
+            let mut buf = vec![0u8; ERR_LEN];
+            // SAFETY: live config, valid C strings, error buffer of ERR_LEN bytes.
+            let p = unsafe { pc_ocio_inverse_view_processor(self.0, s.as_ptr(), d.as_ptr(), v.as_ptr(), buf.as_mut_ptr().cast(), ERR_LEN) };
+            if p.is_null() { Err(error(&buf)) } else { Ok(RawProcessor(p)) }
+        }
+
+        pub fn lut_processor(&self, src: &str, lut: &str, lut_space: &str, display: &str, view: &str) -> Result<RawProcessor, String> {
+            let (s, l, ls, d, v) = (c_str(src)?, c_str(lut)?, c_str(lut_space)?, c_str(display)?, c_str(view)?);
+            let mut buf = vec![0u8; ERR_LEN];
+            // SAFETY: live config, valid C strings, error buffer of ERR_LEN bytes.
+            let p = unsafe { pc_ocio_lut_processor(self.0, s.as_ptr(), l.as_ptr(), ls.as_ptr(), d.as_ptr(), v.as_ptr(), buf.as_mut_ptr().cast(), ERR_LEN) };
+            if p.is_null() { Err(error(&buf)) } else { Ok(RawProcessor(p)) }
         }
 
         pub fn role(&self, role: &str) -> Option<String> {
@@ -330,6 +474,18 @@ mod imp {
         pub fn role(&self, _role: &str) -> Option<String> {
             None
         }
+        pub fn viewers(&self) -> (Vec<super::Display>, String, Vec<String>) {
+            (Vec::new(), String::new(), Vec::new())
+        }
+        pub fn display_view_processor(&self, _src: &str, _display: &str, _view: &str, _look: &str) -> Result<RawProcessor, String> {
+            Err(super::NO_OCIO.into())
+        }
+        pub fn lut_processor(&self, _src: &str, _lut: &str, _lut_space: &str, _display: &str, _view: &str) -> Result<RawProcessor, String> {
+            Err(super::NO_OCIO.into())
+        }
+        pub fn inverse_view_processor(&self, _dst: &str, _display: &str, _view: &str) -> Result<RawProcessor, String> {
+            Err(super::NO_OCIO.into())
+        }
         pub fn processor(&self, _src: &str, _dst: &str) -> Result<RawProcessor, String> {
             Err(super::NO_OCIO.into())
         }
@@ -388,5 +544,63 @@ mod tests {
         let lin = c.processor("ACEScct", "ACEScg").unwrap().apply_rgb([1.2; 3]);
         assert!(lin[0] > 20.0, "{lin:?}");
         assert!(c.processor("ACEScg", "No Such Space").is_err());
+    }
+
+    #[test]
+    fn displays_views_and_the_viewer_process() {
+        let c = current().unwrap();
+        let display = c.default_display().expect("a default display");
+        assert!(c.displays().iter().any(|d| d.name == "sRGB - Display"), "{:?}", c.displays());
+        let views = c.views("sRGB - Display");
+        assert!(views.iter().any(|v| v.starts_with("ACES 1.0 - SDR")), "{views:?}");
+        assert!(!c.views(display).is_empty());
+        // The ACES SDR output transform tone-maps: 18% grey lands mid-range, a 16× superwhite
+        // stays under display white, and nothing comes out above 1.
+        let sdr = views.iter().find(|v| v.starts_with("ACES 1.0 - SDR")).unwrap();
+        let p = c.display_view_processor("ACEScg", "sRGB - Display", sdr, None).unwrap();
+        let grey = p.apply_rgb([0.18; 3]);
+        assert!(grey[0] > 0.3 && grey[0] < 0.55, "{grey:?}");
+        let hot = p.apply_rgb([16.0; 3]);
+        assert!(hot[0] > grey[0] && hot[0] <= 1.0 + 1e-4, "{hot:?}");
+        assert!(c.display_view_processor("ACEScg", "No Such Display", sdr, None).is_err());
+    }
+
+    /// A .cube LUT in the viewer: an identity LUT in ACEScct gives back the input exactly (it
+    /// round-trips through ACEScct), a LUT that halves gives half, and a missing file is an error.
+    #[test]
+    fn lut_files_run_in_their_input_space() {
+        let c = current().unwrap();
+        let dir = std::env::temp_dir().join(format!("pc-ocio-lut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cube = |name: &str, f: fn(f32) -> f32| {
+            let n = 5;
+            let mut s = format!("LUT_3D_SIZE {n}\n");
+            for b in 0..n {
+                for g in 0..n {
+                    for r in 0..n {
+                        let v = |i: usize| f(i as f32 / (n - 1) as f32);
+                        s.push_str(&format!("{} {} {}\n", v(r), v(g), v(b)));
+                    }
+                }
+            }
+            let p = dir.join(name);
+            std::fs::write(&p, s).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let identity = cube("identity.cube", |v| v);
+        let half = cube("half.cube", |v| v * 0.5);
+        // Identity in ACEScct, then back to ACEScg and through no view: ACEScct values.
+        let p = c.lut_processor("ACEScg", &identity, "ACEScct", None).unwrap();
+        let cct = c.processor("ACEScg", "ACEScct").unwrap().apply_rgb([0.18; 3]);
+        assert!(close(p.apply_rgb([0.18; 3]), cct, 1e-3));
+        let p = c.lut_processor("ACEScg", &half, "ACEScct", None).unwrap();
+        assert!(close(p.apply_rgb([0.18; 3]), cct.map(|v| v * 0.5), 1e-3));
+        // As a look before the view: it still ends in display range.
+        let sdr = c.views("sRGB - Display").iter().find(|v| v.starts_with("ACES 1.0 - SDR")).unwrap().clone();
+        let p = c.lut_processor("ACEScg", &identity, "ACEScct", Some(("sRGB - Display", &sdr))).unwrap();
+        let direct = c.display_view_processor("ACEScg", "sRGB - Display", &sdr, None).unwrap().apply_rgb([0.18; 3]);
+        assert!(close(p.apply_rgb([0.18; 3]), direct, 2e-3), "identity look = the view alone");
+        assert!(c.lut_processor("ACEScg", &dir.join("missing.cube").to_string_lossy(), "ACEScct", None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

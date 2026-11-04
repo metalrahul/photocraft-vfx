@@ -57,7 +57,7 @@ pub struct Perf {
     /// The Memory Usage allowance and the GPU Memory preference (bytes) `gpu_budget_mb` was
     /// computed from.
     #[serde(skip)]
-    pub gpu_budget_allowance: (u64, u64),
+    pub gpu_budget_allowance: (u64, u64, u32),
     /// The layer pages the last full refresh needed against the part of the budget they may
     /// hold; when they don't fit, edits that redraw the whole document do it on the CPU.
     pub gpu_layer_fit: Option<LayerFit>,

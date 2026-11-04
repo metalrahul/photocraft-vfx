@@ -517,6 +517,13 @@ on the CPU and prefers software window adapters, when available. macOS still use
 the window. A failed window renderer initialization retries once in CPU compatibility mode;
 a driver process crash is detected by the startup marker on the next launch.
 
+`performance.performanceMode` accepts `efficient`, `balanced`, or `maximum` and applies at
+once. Efficient plans for about half of the graphics card's memory, Balanced about three
+quarters (falling back to the CPU when layers don't fit), Maximum the card less a reserve of an
+eighth (at least 2.5 GB) with layers paged on the GPU. Unset (`null`), it is `maximum` under
+Rendering Mode GPU and `balanced` otherwise. Each GPU out-of-memory error in a session takes a
+quarter off the budgets, down to a quarter.
+
 ### Camera Raw dialog
 
 On the desktop the dialog is a window of its own (title bar, moved and resized like any window), as Adobe Camera Raw is; the main window is dimmed and takes no input while it is open, and closing the window is Cancel. Where the platform has no extra windows (the web build) it is drawn over the main window.

@@ -614,7 +614,7 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
 /// structural change, not per brush dab) and whenever either preference changes.
 fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: usize, partial: bool, visible: DRect) {
     gpu.set_focus(Some(visible));
-    let force = apply_force_gpu(app, gpu);
+    apply_force_gpu(app, gpu);
     let allowance = budget_allowance(app);
     let changed = app.perf.gpu_budget_allowance != allowance;
     if partial && !changed && gpu.memory_budget().is_some() {
@@ -623,11 +623,8 @@ fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: 
     let Some(st) = app.session.documents().get(idx) else { return };
     let pixels = st.memory_bytes() as u64;
     let ram = crate::gpu_canvas::physical_memory();
-    let budget = if force {
-        crate::gpu_canvas::forced_memory_budget(ram, gpu.video_memory(), allowance.1)
-    } else {
-        crate::gpu_canvas::memory_budget(allowance.0, pixels, ram, gpu.video_memory(), allowance.1)
-    };
+    let mode = app.session.prefs().performance.effective_performance_mode();
+    let (budget, _) = crate::gpu_canvas::profile_budgets(mode, allowance.0, pixels, ram, gpu.video_memory(), allowance.1, app.gpu_oom_retries);
     gpu.set_memory_budget(budget);
     app.perf.gpu_budget_mb = budget >> 20;
     app.perf.gpu_budget_allowance = allowance;
@@ -636,28 +633,36 @@ fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: 
     }
 }
 
-/// Rendering Mode › GPU (Preferences › Performance): stay on the GPU for large 32-bit documents
-/// and big brushes instead of redrawing on the CPU when the layers are over the memory budget.
+/// Rendering Mode › GPU or Performance Mode › Maximum (Preferences › Performance): stay on the
+/// GPU for large 32-bit documents and big brushes, paging layers in and out, instead of redrawing
+/// on the CPU when they are over the memory budget.
 pub(crate) fn force_gpu(app: &PhotocraftApp) -> bool {
-    app.session.prefs().performance.effective_rendering_mode() == photocraft_engine::prefs::RenderingMode::Gpu
+    use photocraft_engine::prefs::{PerformanceMode, RenderingMode};
+    let p = &app.session.prefs().performance;
+    match p.effective_rendering_mode() {
+        RenderingMode::Gpu => true,
+        RenderingMode::Cpu => false,
+        RenderingMode::Auto => p.effective_performance_mode() == PerformanceMode::Maximum,
+    }
 }
 
-/// Tell the GPU canvas whether [`force_gpu`] is on and, when it is, widen its canvas texture
-/// budget ([`crate::gpu_canvas::forced_canvas_budget`]) so a large canvas keeps GPU textures.
-/// Automatic leaves the canvas budget the canvas started with.
+/// Tell the GPU canvas whether [`force_gpu`] is on, and size its canvas texture budget from
+/// Performance Mode ([`crate::gpu_canvas::profile_budgets`]), smaller after out-of-memory errors.
 fn apply_force_gpu(app: &PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas) -> bool {
     let force = force_gpu(app);
     gpu.set_force_gpu(force);
-    if force {
-        gpu.set_canvas_budget(crate::gpu_canvas::forced_canvas_budget(crate::gpu_canvas::physical_memory(), gpu.video_memory()));
-    }
+    let mode = app.session.prefs().performance.effective_performance_mode();
+    let (_, canvas) = crate::gpu_canvas::profile_budgets(mode, 0, 0, crate::gpu_canvas::physical_memory(), gpu.video_memory(), 0, app.gpu_oom_retries);
+    gpu.set_canvas_budget(canvas);
     force
 }
 
-/// Memory Usage and GPU Memory (Preferences › Performance), in bytes.
-fn budget_allowance(app: &PhotocraftApp) -> (u64, u64) {
+/// Memory Usage and GPU Memory (Preferences › Performance), in bytes, and a key for Performance
+/// Mode and the out-of-memory errors so far: a change to any of them resizes the budget.
+fn budget_allowance(app: &PhotocraftApp) -> (u64, u64, u32) {
     let performance = &app.session.prefs().performance;
-    (u64::from(performance.effective_memory_usage_mb()).saturating_mul(1 << 20), u64::from(performance.gpu_memory_mb).saturating_mul(1 << 20))
+    let profile = performance.effective_performance_mode() as u32 * 16 + app.gpu_oom_retries.min(15);
+    (u64::from(performance.effective_memory_usage_mb()).saturating_mul(1 << 20), u64::from(performance.gpu_memory_mb).saturating_mul(1 << 20), profile)
 }
 
 /// The document pixels a view shows, with a margin for filtering. Uses all four canvas corners

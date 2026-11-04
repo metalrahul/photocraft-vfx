@@ -466,8 +466,8 @@ fn choice_and_range_tables_cover_enum_fields() {
         for (k, v) in p[id].as_object().unwrap() {
             let path = format!("{id}.{k}");
             if let Some(c) = choices(&path) {
-                if path == "performance.renderingMode" && v.is_null() {
-                    assert_eq!(p["performance"]["renderingMode"], json!(null), "legacy mode is inferred until explicitly selected");
+                if matches!(path.as_str(), "performance.renderingMode" | "performance.performanceMode") && v.is_null() {
+                    assert_eq!(p["performance"][k.as_str()], json!(null), "legacy mode is inferred until explicitly selected");
                 } else {
                     assert!(c.contains(&v.as_str().unwrap()), "{path}");
                 }

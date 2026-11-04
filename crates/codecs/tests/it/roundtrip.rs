@@ -165,6 +165,23 @@ fn hdr_values_survive_float_formats() {
     }
 }
 
+/// `exr_half` writes a 32-bit float image as 16-bit half (a document opened from a half EXR
+/// saves back as one): values come back as their nearest half, HDR values kept.
+#[test]
+fn exr_half_writes_float_images_as_half() {
+    let vals: Vec<f32> = (0..16 * 8 * 3).map(|i| (i as f32 - 40.0) * 0.37).collect();
+    let img = Image::from_f32(16, 8, ChannelLayout::Rgb, &vals).unwrap();
+    let opts = EncodeOptions { exr_half: true, ..Default::default() };
+    let back = decode(&encode(&img, Format::OpenExr, &opts).unwrap()).unwrap();
+    assert_eq!(back.sample_type(), SampleType::F16);
+    for (got, want) in back.to_f32_samples().unwrap().iter().zip(&vals) {
+        assert!((got - want).abs() <= want.abs() / 1024.0 + 1e-3, "{want} -> {got}");
+    }
+    // Without it, float stays 32-bit.
+    let full = decode(&encode(&img, Format::OpenExr, &EncodeOptions::default()).unwrap()).unwrap();
+    assert_eq!(full.sample_type(), SampleType::F32);
+}
+
 #[test]
 fn hdr_format_keeps_bright_values_approximately() {
     let vals: Vec<f32> = (0..16 * 8 * 3).map(|i| 0.01 + i as f32 * 0.25).collect();

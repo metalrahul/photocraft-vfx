@@ -2,7 +2,7 @@ use super::shortcuts::normalize_shortcut;
 use super::{
     AppearanceMode, Ask, CanvasBorder, CanvasColor, CheckerColors, CheckerSize, ColorPicker, DarkTheme, ExportLocation, ExportMetadata, FontPreview,
     GpuBackend, Interpolation, LightTheme, LineStyle, LinuxDisplayServer, LogDestination, LogDetail, OtherCursor, PaintingCursor, PointSize, PressureCurve,
-    QuickExportFormat, RawColorSpace, RawDemosaic, RawDepth, RawSharpen, RenderingMode, RightClickPaint, TextEngine, Theme, TypeUnit, UiFontSize, UiScale,
+    QuickExportFormat, RawColorSpace, RawDemosaic, RawDepth, RawSharpen, PerformanceMode, RenderingMode, RightClickPaint, TextEngine, Theme, TypeUnit, UiFontSize, UiScale,
     Unit, Value,
 };
 
@@ -104,6 +104,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "performance.gpuBackend" => GpuBackend::NAMES,
         "performance.linuxDisplayServer" => LinuxDisplayServer::NAMES,
         "performance.renderingMode" => RenderingMode::NAMES,
+        "performance.performanceMode" => PerformanceMode::NAMES,
         _ => return None,
     })
 }

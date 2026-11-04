@@ -3,11 +3,12 @@ struct View {
     a: vec4<f32>, // screen_w, screen_h, scale (device px per doc px), pixels_per_point
     b: vec4<f32>, // doc origin x, y (device px), doc w, h (doc px)
     c: vec4<f32>, // filter mode, lod, grid alpha, checker square (device px)
-    d: vec4<f32>, // pattern preview offset x, y (doc px), display (0 none, 1 LUT, 2 LUT + gamut, 3 matrix/shaper), output linear
+    d: vec4<f32>, // pattern preview offset x, y (doc px), display (0 none, 1 LUT, 2 LUT + gamut, 3 matrix/shaper, 4 OCIO viewer), output linear
     e: vec4<f32>, // checker light rgb, gamut warning opacity
     f: vec4<f32>, // checker dark rgb, 32-bit preview gain (2^exposure; 0 = off)
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
+    i: vec4<f32>, // viewer channel (0 RGB, 1 R, 2 G, 3 B, 4 A, 5 luminance), unused ×3
 };
 struct Tile { r: vec4<f32> }; // x, y, w, h in doc px
 
@@ -179,7 +180,7 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         let f = clamp((tt - i - 0.5) * scale + 0.5, vec2(0.0), vec2(1.0));
         col = textureSampleLevel(tex, samp, (i + 0.5 + f) / size, 0.0);
     }
-    if (view.f.w > 0.0 && col.a > 0.0) {
+    if (view.f.w > 0.0 && col.a > 0.0 && view.d.z < 3.5) {
         // View › 32-bit Preview Options: exposure and gamma in linear light on the sRGB-encoded
         // texture value, before the display LUT. A float canvas keeps values above 1.0, so they
         // are brought into range by the exposure instead of clipped.
@@ -187,7 +188,37 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         let v = linear_to_srgb(min(pow(max(lin, vec3(1e-12)), vec3(view.g.w)), vec3(1.0)));
         col = vec4(v * col.a, col.a);
     }
-    if (view.d.z > 0.5 && col.a > 0.0) {
+    let channel = view.i.x;
+    if (channel > 0.5) {
+        // View › Viewer Channel (Nuke's R/G/B/A/Y): one channel as grey, display only. Alpha shows
+        // the coverage itself (opaque); the others the straight colour value, over the checker.
+        let straight = select(vec3(0.0), col.rgb / max(col.a, 1e-6), col.a > 0.0);
+        if (channel > 4.5) {
+            // Rec.709 luminance of the linear light the texture value encodes.
+            let y = dot(srgb_to_linear(max(straight, vec3(0.0))), vec3(0.2126, 0.7152, 0.0722));
+            col = vec4(linear_to_srgb(vec3(y)) * col.a, col.a);
+        } else if (channel > 3.5) {
+            col = vec4(vec3(col.a), 1.0);
+        } else {
+            let v = select(select(straight.b, straight.g, channel < 2.5), straight.r, channel < 1.5);
+            col = vec4(vec3(v) * col.a, col.a);
+        }
+    }
+    if (view.d.z > 3.5 && col.a > 0.0) {
+        // View › OCIO Viewer (photocraft_engine::ocio_viewer): scene-linear light (exposure applied
+        // as a gain, as Nuke's viewer does) through a log2 shaper over 2^-12 .. 2^12, then the
+        // baked display / view LUT; gamma on the display values after it. Values above 1.0
+        // tone-map through the view instead of clipping.
+        let gain = select(1.0, view.f.w, view.f.w > 0.0);
+        let lin = srgb_to_linear(max(col.rgb / col.a, vec3(0.0))) * gain;
+        let u = clamp((log2(max(lin, vec3(exp2(-12.0)))) + 12.0) / 24.0, vec3(0.0), vec3(1.0));
+        let n = f32(textureDimensions(lut).x);
+        var shown = textureSampleLevel(lut, samp, (u * (n - 1.0) + 0.5) / n, 0.0).rgb;
+        if (view.f.w > 0.0) {
+            shown = pow(max(shown, vec3(0.0)), vec3(view.g.w));
+        }
+        col = vec4(shown * col.a, col.a);
+    } else if (view.d.z > 0.5 && col.a > 0.0) {
         // Colour management, Proof Colors, Gamut Warning: the document's display LUT (alpha flags
         // out-of-gamut colours).
         let c = clamp(col.rgb / col.a, vec3(0.0), vec3(1.0));
