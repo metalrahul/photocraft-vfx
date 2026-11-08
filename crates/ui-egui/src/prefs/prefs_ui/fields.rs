@@ -364,6 +364,8 @@ pub(super) fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, qu
     let drawn_elsewhere = (section == "interface" && matches!(k, "theme" | "appearanceMode" | "darkTheme" | "lightTheme" | "favoriteThemes"))
         // View › Rulers (⌘R) sets it, as in Photoshop.
         || path == "unitsAndRulers.showRulers"
+        // Edit › Color Settings sets the OpenColorIO (ACES) config, with the colour spaces.
+        || path == "fileHandling.ocioConfig"
         || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "gpuAdapter" | "renderingMode" | "performanceMode" | "memoryUsageMb"))
         // The browser presents frames itself: Low-Latency Drawing does nothing there.
         || (cfg!(target_arch = "wasm32") && path == "performance.lowLatencyDrawing")

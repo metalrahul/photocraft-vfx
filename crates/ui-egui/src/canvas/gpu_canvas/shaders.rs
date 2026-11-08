@@ -20,6 +20,45 @@ struct Tile { r: vec4<f32> }; // x, y, w, h in doc px
 @group(2) @binding(1) var display_curves: texture_2d<f32>;
 struct DisplayMatrix { r: vec4<f32>, g: vec4<f32>, b: vec4<f32> };
 @group(2) @binding(2) var<uniform> display_matrix: DisplayMatrix;
+// Large Brush Mode (stroke_overlay.rs): up to four strokes' coverage in document space (one
+// being drawn, the rest waiting for their full-precision writes), and their paint.
+struct StrokeOverlay {
+    color: array<vec4<f32>, 4>, // per slot: paint rgb in the texture's encoding, opacity
+    p: array<vec4<f32>, 4>,     // per slot: coverage texels per doc px, on, linear document, unused
+    order: vec4<f32>,           // slots to lay over the document, oldest stroke first
+    n: vec4<f32>,               // how many of `order` show
+    hide: array<vec4<f32>, 4>,  // per slot: doc rect (x0, y0, x1, y1) its landed write already shows in
+};
+@group(3) @binding(0) var stroke_cov0: texture_2d<f32>;
+@group(3) @binding(1) var stroke_cov1: texture_2d<f32>;
+@group(3) @binding(2) var stroke_cov2: texture_2d<f32>;
+@group(3) @binding(3) var stroke_cov3: texture_2d<f32>;
+@group(3) @binding(4) var<uniform> stroke: StrokeOverlay;
+
+// Coverage texture `t` at texel-space point `q` (texel centres at +0.5), bilinear by hand: a
+// 32-bit float coverage texture isn't filterable everywhere. Clamped at the edges.
+fn cov_bilinear(t: texture_2d<f32>, q: vec2<f32>) -> f32 {
+    let dim = vec2<i32>(textureDimensions(t)) - 1;
+    let x = q - 0.5;
+    let i = vec2<i32>(floor(x));
+    let f = x - floor(x);
+    let a = textureLoad(t, clamp(i, vec2(0), dim), 0).r;
+    let b = textureLoad(t, clamp(i + vec2(1, 0), vec2(0), dim), 0).r;
+    let c = textureLoad(t, clamp(i + vec2(0, 1), vec2(0), dim), 0).r;
+    let e = textureLoad(t, clamp(i + vec2(1, 1), vec2(0), dim), 0).r;
+    return mix(mix(a, b, f.x), mix(c, e, f.x), f.y);
+}
+
+// Stroke slot `k`'s coverage at document pixel `d`.
+fn stroke_coverage(k: i32, d: vec2<f32>) -> f32 {
+    let q = d * stroke.p[k].x;
+    switch k {
+        case 0: { return cov_bilinear(stroke_cov0, q); }
+        case 1: { return cov_bilinear(stroke_cov1, q); }
+        case 2: { return cov_bilinear(stroke_cov2, q); }
+        default: { return cov_bilinear(stroke_cov3, q); }
+    }
+}
 
 fn curve_entry(index: u32) -> vec3<f32> {
     let width = textureDimensions(display_curves).x;
@@ -49,6 +88,11 @@ fn matrix_display(c: vec3<f32>) -> vec3<f32> {
 }
 
 struct VOut { @builtin(position) pos: vec4<f32> };
+
+// Interleaved gradient noise (Jimenez 2014): 0..1, evenly spread, no texture needed.
+fn ign(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(floor(p), vec2(0.06711056, 0.00583715))));
+}
 
 fn corner(i: u32) -> vec2<f32> {
     var c = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
@@ -180,6 +224,31 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         let f = clamp((tt - i - 0.5) * scale + 0.5, vec2(0.0), vec2(1.0));
         col = textureSampleLevel(tex, samp, (i + 0.5 + f) / size, 0.0);
     }
+    // Large Brush Mode: the strokes drawn so far, oldest first, each Normal over the document as
+    // its commit will paint it; a linear document blends in linear light.
+    let strokes = i32(stroke.n.x);
+    for (var j = 0; j < strokes; j++) {
+        let k = clamp(i32(stroke.order[j]), 0, 3);
+        if (stroke.p[k].y < 0.5) {
+            continue;
+        }
+        let h = stroke.hide[k];
+        if (d.x >= h.x && d.x < h.z && d.y >= h.y && d.y < h.w) {
+            continue;
+        }
+        let a = clamp(stroke_coverage(k, d), 0.0, 1.0) * stroke.color[k].a;
+        if (a > 0.0) {
+            let paint_enc = max(stroke.color[k].rgb, vec3(0.0));
+            let out_a = a + col.a * (1.0 - a);
+            if (stroke.p[k].z > 0.5) {
+                let below = srgb_to_linear(max(col.rgb / max(col.a, 1e-6), vec3(0.0))) * col.a;
+                let lin = srgb_to_linear(paint_enc) * a + below * (1.0 - a);
+                col = vec4(linear_to_srgb(lin / max(out_a, 1e-6)) * out_a, out_a);
+            } else {
+                col = vec4(paint_enc * a + col.rgb * (1.0 - a), out_a);
+            }
+        }
+    }
     if (view.f.w > 0.0 && col.a > 0.0 && view.d.z < 3.5) {
         // View › 32-bit Preview Options: exposure and gamma in linear light on the sRGB-encoded
         // texture value, before the display LUT. A float canvas keeps values above 1.0, so they
@@ -247,6 +316,10 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
             rgb = rgb * (1.0 - white - black) + vec3(white);
         }
     }
+    // Half a display code value of interleaved-gradient noise: soft gradients (a 32-bit linear
+    // sky, a huge soft brush in the shadows) no longer band on 8- and 10-bit monitors. Display
+    // only; the document's pixels are untouched.
+    rgb = max(rgb + (ign(p) - 0.5) / 255.0, vec3(0.0));
     if (view.d.w > 0.5) {
         rgb = srgb_to_linear(rgb);
     }

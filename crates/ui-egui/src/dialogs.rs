@@ -24,6 +24,14 @@ fn browse_field(app: &mut PhotocraftApp, id: u64, fields: &serde_json::Map<Strin
     let key = key.to_string();
     let r = if is_folder_field(&key) {
         app.ask_folder(move |app, path| fill_field(app, id, &key, path))
+    } else if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
+        // Color Settings › Ocio Config: a config.ocio file.
+        let initial_dir = crate::file_dialog::last_used_dir(&app.ui.recent_files);
+        let request = crate::file_dialog::FileDialogRequest::Open { multiple: false, initial_dir, extensions: Some(vec!["ocio".into()]) };
+        app.ask_file(request, move |app, answer| match answer {
+            crate::file_dialog::FileDialogAnswer::Paths(mut paths) if !paths.is_empty() => fill_field(app, id, &key, paths.remove(0)),
+            _ => Ok(Value::Null),
+        })
     } else if fields.get("__command").and_then(Value::as_str) == Some("plugin.install") {
         let initial_dir = crate::file_dialog::last_used_dir(&app.ui.recent_files);
         let request = crate::file_dialog::FileDialogRequest::Open { multiple: false, initial_dir, extensions: Some(vec!["wasm".into()]) };
@@ -394,7 +402,9 @@ fn dialog_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: &
 fn filter_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: &mut Fields, id: egui::Id) {
     // Color Settings: the monitor profile in use can change while it is open.
     if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
-        fields.insert("__note".into(), Value::String(crate::monitor_status::note(app)));
+        // And which OCIO config is in use (the preference, as saved).
+        let ocio = photocraft_engine::color_cmds::ocio_status(&app.session.prefs().file_handling.ocio_config);
+        fields.insert("__note".into(), Value::String(format!("{}\n{ocio}", crate::monitor_status::note(app))));
     }
     // Long parameter lists (Flame, Lighting Effects) scroll, so the title and the
     // OK / Cancel buttons stay inside a small window. The preview window below the

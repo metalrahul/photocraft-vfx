@@ -138,6 +138,7 @@ pub use dialogs::color_table_ui;
 pub use dialogs::credits;
 pub use dialogs::dds_options_ui;
 pub use dialogs::delete_layer_prompt;
+pub use dialogs::depth_ui;
 pub use dialogs::dialog_alt_reset;
 pub use dialogs::dialog_blend_ui;
 pub use dialogs::discard_ui;
@@ -153,6 +154,7 @@ use dialogs::filter_preview_ui;
 pub use dialogs::gallery_ui;
 pub use dialogs::guide_layout_ui;
 pub use dialogs::history_options_ui;
+pub use dialogs::input_space_ui;
 pub use dialogs::jpeg_options_ui;
 pub use dialogs::layer_picker;
 pub use dialogs::layer_style;
@@ -178,8 +180,6 @@ pub use dialogs::snapshot_dialog;
 pub(crate) use dialogs::solid_fill_ui;
 pub use dialogs::stack_dialog;
 pub use dialogs::stroke_ui;
-pub use dialogs::depth_ui;
-pub use dialogs::input_space_ui;
 pub use dialogs::targa_options_ui;
 pub use dialogs::tiff_options_ui;
 pub use dialogs::vp_ui;
@@ -253,11 +253,11 @@ pub(crate) use services::SAVE_OPTIONS_OPEN;
 #[cfg(test)]
 pub(crate) use services::saved_revision_after_write;
 pub use services::{
-    AdoptAutosaveFn, AppendTextFn, AutomationCommandFn, AutomationOpenPcraftFn, AutomationReadFn, AutomationWriteFn, AutosaveFn, AutosaveResultsFn, CapsLockFn,
-    CaptionStyleFn, ClipboardGetFn, ClipboardSetFn, ClipboardUnreadableFn, CursorPosFn, DiscardAutosaveFn, EncodePngFn, ExportFn, ExportSettings,
-    ExternalSvgEditor, ExternalSvgSession, ExternalVectorSave, ExternalVectorSource, FileStamp, FileStampFn, FormatChoices, ImportFn, Inbox, LoadTextFn,
-    OpenExternalSvgFn, OpenUrlFn, OsEventsFn, PhotoshopShortcutsFn, QuitFn, RecoverFn, Recoverable, RightButtonDownFn, SameFileFn, SaveFileFn, SaveTextFn,
-    Services, SystemThemeFn, WindowFrameFn, WriteFn,
+    AdoptAutosaveFn, AppendTextFn, AutomationCommandFn, AutomationOpenPcraftFn, AutomationReadFn, AutomationWriteFn, AutosaveFn, AutosaveResultsFn,
+    BarrelPressesFn, CapsLockFn, CaptionStyleFn, ClipboardGetFn, ClipboardSetFn, ClipboardUnreadableFn, CursorPosFn, DiscardAutosaveFn, EncodePngFn, ExportFn,
+    ExportSettings, ExternalSvgEditor, ExternalSvgSession, ExternalVectorSave, ExternalVectorSource, FileStamp, FileStampFn, FormatChoices, ImportFn, Inbox,
+    LoadTextFn, OpenExternalSvgFn, OpenUrlFn, OsEventsFn, PhotoshopShortcutsFn, QuitFn, RecoverFn, Recoverable, RightButtonDownFn, SameFileFn, SaveFileFn,
+    SaveTextFn, Services, SystemThemeFn, WindowFrameFn, WriteFn,
 };
 pub use text::bidi_text;
 pub use text::cjk_fonts;
@@ -368,6 +368,22 @@ pub struct PhotocraftApp {
     pub(crate) tool_override: Option<state::Tool>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
+    /// Large Brush Mode stroke being drawn: its dabs show as a GPU overlay and nothing is
+    /// rendered into the document until release (see `canvas::GpuStroke`).
+    gpu_stroke: Option<canvas::GpuStroke>,
+    /// Released Large Brush Mode strokes waiting to land in the document, oldest first; the first
+    /// renders at full precision off the UI thread (`canvas::finish_gpu_commit`).
+    gpu_commits: std::collections::VecDeque<canvas::QueuedCommit>,
+    /// Landed Large Brush Mode strokes whose overlays wait for the canvas refresh that shows
+    /// them: (overlay slot, document, frames waited).
+    gpu_landed: Vec<(usize, photocraft_doc::DocId, u8)>,
+    /// Landing a stroke runs its commit; commands it runs mustn't land the queue again.
+    gpu_commit_landing: bool,
+    /// A big landed Large Brush Mode stroke whose canvas refresh goes a band of rows per frame.
+    gpu_band: Option<canvas::LandingBand>,
+    /// Where Large Brush Mode strokes painted into their layers drew since the canvas last
+    /// recomposited (document, rect).
+    gpu_live_damage: Option<(photocraft_doc::DocId, photocraft_geom::Rect)>,
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
     /// refresh only what it drew after the step they showed (`canvas::damage_since`).
     committed_stroke: Option<canvas::CommittedStroke>,

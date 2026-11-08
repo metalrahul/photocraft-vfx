@@ -916,12 +916,113 @@ impl StrokeRenderer {
         self.cov.bounds
     }
 
+    /// Tile by tile: the coverage of `dabs` built one block of the canvas at a time, each block
+    /// taking every dab that reaches it in order, on all cores. Each pixel sees the same dabs in
+    /// the same order with the same arithmetic as the dab-by-dab loop, so the pixels are the
+    /// same; but a block's tiles stay in cache through all its dabs, and no dab-sized buffer is
+    /// written and read back per dab (a 4000 px soft dab is 64 MB of it). False, leaving the
+    /// work to the dab-by-dab loop, when it doesn't pay: one dab, or little area. Not for Wet
+    /// Edges (per-dab depth) or a dual brush.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn raster_tiled(&mut self, dabs: &[Dab]) -> bool {
+        use rayon::prelude::*;
+        /// A block: 4×4 coverage tiles.
+        const BLOCK: i32 = COV_TILE * 4;
+        if dabs.len() < 2 {
+            return false;
+        }
+        let rects: Vec<Rect> = dabs.iter().map(|d| self.ctx.dab_rect(d, false)).collect();
+        let area = rects.iter().fold(0usize, |a, r| a.saturating_add(r.width().max(0) as usize * r.height().max(0) as usize));
+        if !parallel(area) {
+            return false;
+        }
+        let nc = self.cov.nc;
+        let colors: Vec<Option<([f32; 8], usize)>> = dabs
+            .iter()
+            .map(|d| match (self.per_dab_color, self.fmt) {
+                (true, Some(f)) if nc > 0 => {
+                    let mut native = [0.0f32; 8];
+                    from_rgba_into(&f, d.color, &mut native);
+                    Some((native, f.mode.color_channels()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Which dabs reach which block, in stroke order.
+        let mut blocks: FxHashMap<(i32, i32), Vec<usize>> = FxHashMap::default();
+        for (i, r) in rects.iter().enumerate() {
+            if r.is_empty() {
+                continue;
+            }
+            for by in r.y0.div_euclid(BLOCK)..=(r.y1 - 1).div_euclid(BLOCK) {
+                for bx in r.x0.div_euclid(BLOCK)..=(r.x1 - 1).div_euclid(BLOCK) {
+                    blocks.entry((bx, by)).or_default().push(i);
+                }
+            }
+        }
+        // Each block owns its tiles while it works (those already in the map, and any it starts).
+        let per = BLOCK / COV_TILE;
+        let mut work: Vec<((i32, i32), Vec<usize>, Vec<((i32, i32), Option<CovTile>, bool)>)> = blocks
+            .into_iter()
+            .map(|(b, list)| {
+                let tiles = (0..per)
+                    .flat_map(|j| (0..per).map(move |i| (b.0 * per + i, b.1 * per + j)))
+                    .map(|k| (k, self.cov.tiles.remove(&tile_key(k)), false))
+                    .collect();
+                (b, list, tiles)
+            })
+            .collect();
+        let ctx = &self.ctx;
+        work.par_iter_mut().for_each_init(Vec::new, |scratch, (b, list, tiles)| {
+            let block = Rect::new(b.0 * BLOCK, b.1 * BLOCK, (b.0 + 1) * BLOCK, (b.1 + 1) * BLOCK);
+            for &i in list.iter() {
+                let r = rects[i].intersect(&block);
+                if r.is_empty() {
+                    continue;
+                }
+                ctx.rasterize_into(&dabs[i], false, r, scratch, None);
+                let color = colors[i].as_ref().map(|(c, n)| &c[..*n]);
+                let dab = DabValues { vals: scratch, rect: r, w: r.width() as usize, ceil: dabs[i].opacity, color, depth: None, nc };
+                for (key, slot, touched) in tiles.iter_mut() {
+                    let tr = Rect::new(key.0 * COV_TILE, key.1 * COV_TILE, (key.0 + 1) * COV_TILE, (key.1 + 1) * COV_TILE).intersect(&r);
+                    if tr.is_empty() || !dab.touches(tr) {
+                        continue;
+                    }
+                    let tile = slot.get_or_insert_with(CovTile::new);
+                    dab.prepare(tile);
+                    dab.tile(tr, *key, tile);
+                    *touched = true;
+                }
+            }
+        });
+        for (_, _, tiles) in work {
+            for (key, slot, touched) in tiles {
+                if let Some(tile) = slot {
+                    self.cov.tiles.insert(tile_key(key), tile);
+                }
+                if touched {
+                    self.cov.dirty.insert(key);
+                }
+            }
+        }
+        for r in &rects {
+            if !r.is_empty() {
+                self.cov.bounds = self.cov.bounds.union(r);
+            }
+        }
+        true
+    }
+
     fn raster_pending(&mut self) {
         let mut dabs = std::mem::take(&mut self.dab_buf);
         let mut duals = std::mem::take(&mut self.dual_buf);
         let wet = self.ctx.brush.wet_edges;
         let mut native = [0.0f32; 8];
-        for d in &dabs {
+        #[cfg(not(target_arch = "wasm32"))]
+        let tiled = !wet && self.dual.is_none() && self.raster_tiled(&dabs);
+        #[cfg(target_arch = "wasm32")]
+        let tiled = false;
+        for d in dabs.iter().filter(|_| !tiled) {
             let rect = self.ctx.dab_rect(d, false);
             // Wet Edges acts on the whole stroke (#2088): the dab records how deep it reaches each
             // pixel and the stroke darkens its own rim when composited, not every dab's.
@@ -969,6 +1070,25 @@ impl StrokeRenderer {
     pub fn push(&mut self, pts: &[StrokePoint]) {
         self.generator.push(pts, &mut self.dab_buf, &mut self.dual_buf);
         self.raster_pending();
+    }
+
+    /// Feed input points and return the primary dabs they make without rasterising them: a GPU
+    /// preview draws them (Large Brush Mode). The same points and seed fed to [`push`](Self::push)
+    /// make the same dabs, so the full-precision commit paints what the preview showed.
+    pub fn push_dabs(&mut self, pts: &[StrokePoint]) -> Vec<Dab> {
+        self.generator.push(pts, &mut self.dab_buf, &mut self.dual_buf);
+        self.dual_buf.clear();
+        self.dabs_done += self.dab_buf.len();
+        std::mem::take(&mut self.dab_buf)
+    }
+
+    /// The dabs finishing the stroke now would add (smoothing catch-up, a lone first point), for
+    /// a GPU preview: see [`push_dabs`](Self::push_dabs).
+    pub fn finish_dabs(&mut self) -> Vec<Dab> {
+        self.generator.finish(&mut self.dab_buf, &mut self.dual_buf);
+        self.dual_buf.clear();
+        self.dabs_done += self.dab_buf.len();
+        std::mem::take(&mut self.dab_buf)
     }
 
     /// End of stroke (smoothing catch-up, a lone first point).

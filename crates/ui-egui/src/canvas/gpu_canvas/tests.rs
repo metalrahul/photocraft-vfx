@@ -416,7 +416,9 @@ fn half_floats() {
 #[test]
 fn shaders_validate() {
     use wgpu::naga;
-    for (name, src) in [("canvas", CANVAS_WGSL), ("mip", MIP_WGSL), ("encode", ENCODE_WGSL)] {
+    for (name, src) in [("canvas", CANVAS_WGSL), ("mip", MIP_WGSL), ("encode", ENCODE_WGSL), ("stroke dabs", super::stroke_overlay::DAB_WGSL),
+        ("exact stroke dabs", super::stroke_overlay::EXACT_DAB_WGSL),
+    ] {
         let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
             .validate(&module)
@@ -441,4 +443,44 @@ fn performance_modes_scale_the_budgets() {
     assert_eq!(b(M::Maximum, 1).0, x.0 / 4 * 3);
     assert_eq!(b(M::Maximum, 9).0, x.0 / 4);
     assert_eq!(profile_budgets(M::Efficient, 0, 0, ram, Some(G), 0, 3), (MIN_GPU_BUDGET, MIN_GPU_BUDGET));
+}
+
+/// Performance Mode raises the lower-stack cache cap: Efficient keeps the old 512 MiB.
+#[test]
+fn performance_modes_raise_the_composite_cache() {
+    use photocraft_engine::prefs::PerformanceMode as M;
+    assert_eq!(composite_cache_cap(M::Efficient), 512 << 20);
+    assert!(composite_cache_cap(M::Efficient) < composite_cache_cap(M::Balanced));
+    assert!(composite_cache_cap(M::Balanced) < composite_cache_cap(M::Maximum));
+}
+
+/// Large Brush Mode's coverage texture: full resolution up to 8192 px a side, scaled down to fit
+/// beyond it or the device's limit; paint is sRGB-encoded for linear documents as the display
+/// texture stores them.
+#[test]
+fn stroke_overlay_scale_and_encoding() {
+    use super::stroke_overlay::{coverage_scale, srgb_encode};
+    assert_eq!(coverage_scale(4000, 3000, 16384, 1.0), 1.0);
+    assert_eq!(coverage_scale(16384, 8192, 16384, 1.0), 0.5);
+    assert_eq!(coverage_scale(8000, 8000, 4096, 2.0), 4096.0 / 8000.0);
+    assert_eq!(coverage_scale(16384, 8192, 16384, 0.1), 0.125, "screen resolution, a quarter to spare");
+    assert_eq!(coverage_scale(4000, 3000, 16384, f32::NAN), 1.0);
+    assert!((srgb_encode(0.18) - 0.4613).abs() < 1e-3);
+    assert_eq!(srgb_encode(-1.0), 0.0);
+    assert_eq!(srgb_encode(f32::NAN), 0.0);
+}
+
+/// Large Brush Mode's coverage memory fits the card: at most slots × side² × 4 bytes.
+#[test]
+fn large_brush_buffers_fit_the_card() {
+    use super::stroke_overlay::card_tier;
+    let worst = |v: Option<u64>| {
+        let (slots, side) = card_tier(v);
+        slots as u64 * u64::from(side) * u64::from(side) * 4
+    };
+    assert_eq!(card_tier(Some(24 << 30)), (4, 8192));
+    assert_eq!(card_tier(Some(16 << 30)), (3, 6144));
+    assert_eq!(card_tier(Some(8 << 30)), (2, 4096));
+    assert_eq!(card_tier(None), (2, 4096), "unknown or shared memory: the small tier");
+    assert!(worst(Some(8 << 30)) <= 128 << 20 && worst(Some(16 << 30)) <= 460 << 20);
 }

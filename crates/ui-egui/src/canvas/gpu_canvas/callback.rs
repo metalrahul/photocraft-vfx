@@ -198,6 +198,8 @@ impl CallbackTrait for CanvasCallback {
         let [ox, oy] = self.params.offset.map(|v| if v.is_finite() { v } else { 0.0 });
         pass.set_pipeline(&res.tile_pipeline);
         pass.set_bind_group(2, res.luts.get(&(self.params.doc, self.params.output)).unwrap_or(&res.identity_lut), &[]);
+        // Large Brush Mode's stroke overlay (stroke_overlay.rs), or the idle one.
+        pass.set_bind_group(3, res.stroke.bind_group(self.params.doc), &[]);
         for t in &doc.tiles {
             let [tx, ty, tw, th] = t.rect.map(|v| v as f32);
             let (x0, y0, x1, y1) = tile_screen_aabb(origin, scale, cen, cos, sin, [tx + ox, ty + oy, tw, th]);

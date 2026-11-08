@@ -43,13 +43,14 @@ mod perf;
 mod resources;
 mod setup;
 mod shaders;
+mod stroke_overlay;
 mod texels;
 
 #[cfg(all(test, target_os = "linux"))]
 use budget::nvidia_video_memory;
 pub use budget::{
     DEFER_PX, MIN_GPU_BUDGET, OVER_BUDGET, OVER_CANVAS_BUDGET, REFRESH_DEFERRED, REFRESH_OVER_BUDGET, canvas_budget, canvas_texture_bytes, forced_canvas_budget,
-    efficient_canvas_budget, efficient_memory_budget, forced_memory_budget, memory_budget, physical_memory, profile_budgets, video_memory, vram_reserve, vram_share,
+    composite_cache_cap, efficient_canvas_budget, efficient_memory_budget, forced_memory_budget, memory_budget, physical_memory, profile_budgets, video_memory, vram_reserve, vram_share,
 };
 #[cfg(test)]
 use budget::{NVIDIA_VENDOR, bounded_output, drm_video_memory, parse_nvidia_smi};
@@ -213,11 +214,14 @@ impl GpuCanvas {
         };
         // Device loss and uncaptured errors mark this flag instead of panicking (#243).
         let health = photocraft_gpu::DeviceHealth::watch(&rs.device);
-        let mut res = Resources::new(&rs.device, &rs.queue, rs.target_format, high != HighPolicy::Off);
+        // Large Brush Mode builds pen-pressure opacity exactly where the GPU can (compute pass).
+        let exact = stroke_overlay::exact_dabs_supported(&rs.adapter);
+        let mut res = Resources::new(&rs.device, &rs.queue, rs.target_format, high != HighPolicy::Off, exact);
         res.health = health.clone();
         let info = rs.adapter.get_info();
         res.separate_mip_targets = separate_mip_targets(info.backend, info.vendor, std::env::var("PHOTOCRAFT_SEPARATE_MIPS").ok().as_deref());
         let vram = video_memory(&info);
+        res.stroke.set_card(vram);
         res.canvas_budget.store(canvas_budget(physical_memory(), vram), Ordering::Relaxed);
         let budget = res.canvas_budget.clone();
         rs.renderer.write().callback_resources.insert(res);
@@ -414,6 +418,48 @@ impl GpuCanvas {
             return CpuReason::CompositorBuild(e.0);
         }
         CpuReason::Unsupported(e.0)
+    }
+
+    /// Refresh `band` of document `key` with only the changed layer tiles meeting it uploaded:
+    /// the rest of a big edit stays as the GPU held it until its own band (a Large Brush Mode
+    /// stroke lands a band of rows per frame, its overlay covering what hasn't landed yet).
+    /// Never deferred to background blocks.
+    pub fn refresh_band(
+        &self,
+        key: u64,
+        doc: &photocraft_doc::Document,
+        band: photocraft_geom::Rect,
+        display: Option<&photocraft_engine::display_color::CanvasDisplay>,
+    ) -> Refresh {
+        let set = |region: Option<photocraft_geom::Rect>| {
+            let mut r = self.rs.renderer.write();
+            if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+                res.upload_region = region;
+            }
+        };
+        set(Some(band));
+        let r = self.refresh_with(key, doc, Some(band), display, false);
+        set(None);
+        r
+    }
+
+    /// The most the compositor's lower-stack cache may hold (Performance Mode: 512 MiB, 1.5 GiB or
+    /// 4 GiB; see `photocraft_gpu::Compositor::set_composite_cache_cap`).
+    pub fn set_composite_cache_cap(&self, bytes: u64) {
+        let mut r = self.rs.renderer.write();
+        if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+            if res.compositor_cache_cap == Some(bytes) {
+                return;
+            }
+            res.compositor_cache_cap = Some(bytes);
+            let budget = res.compositor_budget;
+            if let Some(comp) = &mut res.compositor {
+                comp.set_composite_cache_cap(bytes);
+                if let Some(b) = budget {
+                    comp.set_memory_budget(b);
+                }
+            }
+        }
     }
 
     /// Cap lower-stack composite reuse; zero disables it for profiling the uncached path.
@@ -623,6 +669,9 @@ impl GpuCanvas {
             },
         };
         comp.set_health(self.health.clone());
+        if let Some(cap) = res.compositor_cache_cap {
+            comp.set_composite_cache_cap(cap);
+        }
         // Measured, not waited for: the timestamps come back a frame or two later.
         comp.measure_gpu_time(device, queue);
         if let Some(b) = res.compositor_budget {
@@ -632,6 +681,9 @@ impl GpuCanvas {
             comp.set_composite_cache_budget(b);
         }
         comp.set_focus(res.compositor_focus);
+        comp.set_upload_region(res.upload_region);
+        // Large Brush Mode strokes painted into their layers, in their place in the stack.
+        comp.set_live_paint(res.stroke.live_paint(doc.id.0));
         let key = doc.id.0;
         let format = self.format_for(doc.depth, size);
         let fresh = res.docs.get(&key).is_none_or(|d| d.size != size || d.format != format);
@@ -730,6 +782,17 @@ impl GpuCanvas {
         } else if fresh {
             res.docs.remove(&key);
         }
+        // A stroke painted into its layer that the GPU memory budget couldn't hold a copy of the
+        // layer for: laid over the canvas instead, from this frame (no out-of-memory on a
+        // smaller card).
+        if comp.live_over_budget() {
+            res.stroke.lay_over_canvas(key, queue);
+        }
+        let held = comp.resident_bytes() + comp.live_bytes();
+        let result = result.map(|mut s| {
+            s.layer_bytes = held;
+            s
+        });
         res.compositor = Some(comp);
         result
     }
@@ -791,9 +854,14 @@ impl GpuCanvas {
             Ok(stats) => {
                 out.kind = if damage.is_some() { "gpu-rect" } else { "gpu-full" };
                 out.px = region.width() as u64 * region.height() as u64;
-                // Encoding and submitting only: the GPU is still running this work.
-                out.composite_ms = now_ms() - t0;
+                // Encoding and submitting only: the GPU is still running this work. Converting
+                // and staging layer tiles is the upload part of it.
+                out.upload_ms = stats.sync_ms;
+                out.composite_ms = (now_ms() - t0 - stats.sync_ms).max(0.0);
                 out.uploads = stats.tiles_uploaded as u64;
+                out.ready = stats.tiles_ready as u64;
+                out.evicted = stats.evicted as u64;
+                out.layer_mb = stats.layer_bytes >> 20;
                 out.gpu = stats.gpu_time;
                 return out;
             }

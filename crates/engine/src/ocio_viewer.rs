@@ -445,9 +445,12 @@ mod tests {
     /// An sRGB image (display-referred) under an ACES view: the default view is un-tone-mapped,
     /// and with the input set to display-referred the ACES view gives the image back as it is
     /// (the view inverted, then applied) instead of grading it a second time.
-    #[cfg(not(ocio_stub))]
     #[test]
     fn display_referred_images_round_trip_through_the_view() {
+        // A build without OpenColorIO (the `ocio` crate's stub) has no config to test.
+        if !photocraft_ocio::available() {
+            return;
+        }
         let cfg = Config::load(photocraft_ocio::DEFAULT_CONFIG).unwrap();
         let auto = OcioViewer { enabled: true, ..Default::default() };
         let views = cfg.views(&auto.resolved(&cfg, true).display).to_vec();
@@ -483,9 +486,12 @@ mod tests {
         assert!(s.execute("image.inputColorSpace", json!({"input": "No Such Space"})).is_err());
     }
 
-    #[cfg(not(ocio_stub))]
     #[test]
     fn the_viewer_lut_tone_maps_hdr_and_is_monotonic() {
+        // A build without OpenColorIO (the `ocio` crate's stub) has no config to test.
+        if !photocraft_ocio::available() {
+            return;
+        }
         let cfg = Config::load(photocraft_ocio::DEFAULT_CONFIG).unwrap();
         let v = OcioViewer { enabled: true, ..Default::default() }.resolved(&cfg, false);
         assert!(!v.display.is_empty() && !v.view.is_empty(), "{v:?}");

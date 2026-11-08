@@ -515,7 +515,16 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             if from.is_some() {
                 app.stylus.record_point();
             }
-            app.live_stroke = if strokes_live(tool) { begin_live_stroke(app) } else { None };
+            // A Large Brush Mode stroke starts at once, over strokes still landing; any other
+            // stroke paints the document with them in it.
+            app.gpu_stroke = super::strokes::begin_gpu_stroke(app);
+            if app.gpu_stroke.is_none() {
+                let waited = app.perf.stage.wait_ms;
+                super::strokes::finish_gpu_commit(app, true);
+                let why = format!("a {tool:?} stroke without Large Brush Mode ({})", app.ui.status);
+                super::strokes::note_gpu_wait(app, waited, &why);
+            }
+            app.live_stroke = if strokes_live(tool) && app.gpu_stroke.is_none() { begin_live_stroke(app) } else { None };
             if tool == Tool::MixerBrush && app.live_stroke.is_none() {
                 use photocraft_engine::brush_cmds::mixer_live::LiveMixer;
                 let p = app.drag.as_ref().map(|d| stroke_params(app, d, &app.stylus.stroke_points(&d.points)));

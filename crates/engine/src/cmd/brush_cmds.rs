@@ -224,6 +224,17 @@ pub fn resolve_brush(s: &Session, p: &Value, cmd: &str) -> Result<BrushSettings>
         b.smoothing.amount = v.clamp(0.0, 1.0);
     }
     b.color = color(p.get("color"), s.tools.foreground);
+    // HDR paint on a 32-bit document: the colour times 2^intensity (stops), as Photoshop's
+    // 32-bit Color Picker's Intensity and Krita's scene-linear painting allow: values above 1.0
+    // for glows and light passes. Other depths can't hold them and ignore it.
+    if let Some(ev) = p.get("intensity").and_then(Value::as_f64).filter(|v| v.is_finite() && *v != 0.0)
+        && s.active().is_some_and(|st| st.doc.depth == photocraft_color::SampleType::F32)
+    {
+        let k = 2f32.powf(ev.clamp(-20.0, 20.0) as f32);
+        for c in &mut b.color[..3] {
+            *c *= k;
+        }
+    }
     b.color_cmyk = s.tools.picked_cmyk([b.color[0], b.color[1], b.color[2]]).map(|k| ([b.color[0], b.color[1], b.color[2]], k));
     b.background = s.tools.background;
     b.erase = flag(p, "erase", false);
@@ -547,6 +558,8 @@ pub struct LiveStroke {
     points: Vec<StrokePoint>,
     /// The document and revision the stroke started on.
     base: (photocraft_doc::DocId, u64),
+    /// The document itself (see [`LiveCommit::base_doc`]).
+    base_doc: std::sync::Weak<photocraft_doc::Document>,
 }
 
 /// A finished live stroke offered to its own commit ([`Session::offer_live_stroke`],
@@ -558,6 +571,10 @@ pub struct LiveCommit {
     pub(crate) mixer: Option<(MixerState, MixerState)>,
     pub(crate) cmd: String,
     pub(crate) base: (photocraft_doc::DocId, u64),
+    /// The document the stroke started on: when only the revision moved since (selecting a
+    /// layer bumps it without touching the document), the stroke still matches. Empty: the
+    /// revision alone decides.
+    pub(crate) base_doc: std::sync::Weak<photocraft_doc::Document>,
     pub(crate) params: Value,
     /// The Brush's and Pencil's seed; the retouching tools have none.
     pub(crate) seed: Option<u64>,
@@ -579,8 +596,11 @@ impl LiveCommit {
 
     pub(crate) fn matches(&self, s: &Session, cmd: &str, p: &Value, pts: &[StrokePoint]) -> bool {
         let base = s.active().map(|st| (st.doc.id, st.revision));
+        // The same document, though the revision moved on without changing it (a layer
+        // selected while Large Brush Mode's write ran): its pixels still fit.
+        let same_doc = s.active().is_some_and(|st| st.doc.id == self.base.0 && self.base_doc.upgrade().is_some_and(|d| std::sync::Arc::ptr_eq(&d, &st.doc)));
         self.cmd == cmd
-            && base == Some(self.base)
+            && (base == Some(self.base) || same_doc)
             && p.get("seed").and_then(Value::as_u64) == self.seed
             && self.points == pts
             && Self::settings(p) == Self::settings(&self.params)
@@ -596,6 +616,16 @@ impl LiveStroke {
     /// Start a live stroke of `cmd`: `paint.stroke` (the Brush and Eraser) or `paint.pencil`.
     /// Committing `cmd` with the same params and `"seed": live.seed` gives the same pixels.
     pub fn begin_with(s: &Session, cmd: &str, p: &Value) -> Result<Self> {
+        let (mut live, pts) = Self::prepare_with(s, cmd, p)?;
+        live.push(&pts)?;
+        Ok(live)
+    }
+
+    /// [`begin_with`](Self::begin_with) without rendering: the stroke set up on the session,
+    /// and the points of `p` it would render. [`push`](Self::push) them, on another thread if
+    /// need be (Large Brush Mode renders a released stroke off the UI thread), and the result
+    /// is what `begin_with` gives.
+    pub fn prepare_with(s: &Session, cmd: &str, p: &Value) -> Result<(Self, Vec<StrokePoint>)> {
         let captured = crate::channel_cmds::inject_target(s, cmd, p.clone());
         let p = &captured;
         has_paintable(s).map_err(EngineError::Other)?;
@@ -610,6 +640,7 @@ impl LiveStroke {
         let (layer, mut brush, zoom) = stroke_target(s, p, brush)?;
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let base = (st.doc.id, st.revision);
+        let base_doc = std::sync::Arc::downgrade(&st.doc);
         let mut doc = (*st.doc).clone();
         let sel = doc.selection.clone();
         let table = crate::mode_cmds::paint_color_table(&doc, p);
@@ -624,7 +655,7 @@ impl LiveStroke {
         let mirrors: Vec<_> = (0..symmetry.as_ref().map_or(0, |s| s.mirror_count())).map(|_| StrokeRenderer::new(&brush, Some(surf.format()), zoom)).collect();
         let mirror_distinct = vec![false; mirrors.len()];
         let pre = surf.clone();
-        let mut live = Self {
+        let live = Self {
             doc: std::sync::Arc::new(doc),
             seed,
             cmd: cmd.into(),
@@ -643,9 +674,9 @@ impl LiveStroke {
             cmyk: doc_cmyk_space(s),
             points: Vec::new(),
             base,
+            base_doc,
         };
-        live.push(&pts)?;
-        Ok(live)
+        Ok((live, pts))
     }
 
     /// The stroke as its commit would take it over (see [`LiveCommit`]).
@@ -656,12 +687,21 @@ impl LiveStroke {
             mixer: None,
             cmd: self.cmd,
             base: self.base,
+            base_doc: self.base_doc,
             params: self.params,
             seed: Some(self.seed),
             points: self.points,
             surface: surf.clone(),
             bounds,
         })
+    }
+
+    /// The surface the stroke paints as painted so far, what it held before the stroke, and
+    /// everything the stroke touched. Committing takes this surface's tiles as they are, so
+    /// Large Brush Mode's commit thread converts the changed ones for the canvas ahead of time.
+    pub fn painted(&self) -> Option<(&Surface, &Surface, Rect)> {
+        let surf = crate::channel_cmds::read_target_surface(&self.doc, self.layer, &self.params).ok()?;
+        Some((surf, &self.pre, self.bounds()))
     }
 
     /// Everything the stroke has touched so far.
@@ -764,6 +804,7 @@ fn pct(p: &Value, k: &str, d: f32) -> f32 {
     num(p, k).unwrap_or(d).clamp(0.0, 100.0) / 100.0
 }
 
+pub mod gpu_preview;
 pub mod mixer_live;
 fn mixer_brush(s: &mut Session, p: &Value) -> Result<Value> {
     mixer_live::run(s, p)

@@ -98,7 +98,7 @@ pub(crate) use selection::{floating_outline, selection_drag_delta};
 use start_screen::start_screen_drop_hint;
 pub(crate) use strokes::multiple_color_target;
 pub use strokes::paint_target;
-pub(crate) use strokes::{ClonePreviewCache, CommittedStroke, LiveStroke, cancel_mixer_on_context_change, freehand_tool, spread_ms, strokes_live};
+pub(crate) use strokes::{ClonePreviewCache, CommittedStroke, GpuStroke, LandingBand, LiveStroke, QueuedCommit, finish_gpu_commit, note_gpu_wait, tool_state_only, cancel_mixer_on_context_change, freehand_tool, spread_ms, strokes_live};
 use strokes::{HOLD_REPEAT_MS, draw_clone_preview, feed_live_stroke, pointer_button_modifiers, pointer_moves, stroke_wants_time, tap_at_peak_pressure};
 #[cfg(test)]
 pub(crate) use strokes::{SPOT_HEALING_TRAIL, live_retouch_points};
@@ -367,6 +367,8 @@ fn paint_canvas(app: &mut PhotocraftApp, ui: &egui::Ui, view: &View, xf: ViewXfo
     // A flipped or pixel-aspect-corrected view draws through the CPU path (the GPU canvas shader
     // has no mirroring or non-square pixels). Rotation stays on the GPU: it is a view uniform.
     let gpu_ok = crate::gpu_canvas::gpu_view_ok(flip, view.rotation, aspect);
+    // A Large Brush Mode overlay ends with its drag (Escape, a lost pointer, a document switch).
+    strokes::sweep_gpu_stroke(app, ctx);
     if app.gpu.is_some() {
         if gpu_ok {
             crate::render_path::view_ok(app, doc.id.0);

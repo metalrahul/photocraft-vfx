@@ -644,6 +644,9 @@ pub(crate) fn source_label(key: &str) -> String {
     if key == "bpc" {
         return "Black Point Compensation".into();
     }
+    if key == "ocioConfig" {
+        return "OCIO Config (ACES)".into();
+    }
     // A name that already reads as text ("iPhone 14 Pro Max", "Web 1920") is not camelCase.
     if key.contains(' ') {
         return key.to_string();
@@ -961,11 +964,17 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     let lp = ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
                     ui.add(egui::TextEdit::singleline(&mut v).desired_width(200.0)).labelled_by(lp.id);
                     // Install Plug-in…: pick the .wasm file instead of typing its path (#7531).
-                    if cmd == "plugin.install" && p.key == "path" && crate::widgets::secondary_button(ui, tl!("Browse…"), 0.0).clicked() {
+                    let browse = (cmd == "plugin.install" && p.key == "path") || (cmd == "edit.colorSettings" && p.key == "ocioConfig");
+                    if browse && crate::widgets::secondary_button(ui, tl!("Browse…"), 0.0).clicked() {
                         f.insert(crate::dialogs::BROWSE_FIELD.into(), json!(p.key));
                     }
+                    // Color Settings: back to $OCIO, else the built-in ACES config.
+                    if cmd == "edit.colorSettings" && p.key == "ocioConfig" && !v.is_empty() && crate::widgets::secondary_button(ui, tl!("Default"), 0.0).clicked() {
+                        v.clear();
+                    }
                 });
-                if v.is_empty() {
+                // An empty OCIO config is a choice (the default), not "unchanged".
+                if v.is_empty() && !(cmd == "edit.colorSettings" && p.key == "ocioConfig") {
                     f.remove(&p.key);
                 } else {
                     f.insert(p.key, json!(v));

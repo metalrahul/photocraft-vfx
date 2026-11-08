@@ -479,6 +479,16 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
         damage = Some(crate::blend_preview::clip_damage(app, id, revision, raw_key, region, blend_visible));
     }
     app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - damage_start;
+    // A stroke landing in bands that another edit overtook: the rows it hadn't refreshed go with
+    // this refresh.
+    if let Some(rest) = super::strokes::flush_band(app, id, revision) {
+        damage = damage.map(|d| d.union(&rest));
+    }
+    // Large Brush Mode strokes painted into their layers: where their new dabs land.
+    let live_damage = super::strokes::take_live_damage(app, id);
+    if let Some(r) = live_damage {
+        damage = damage.map(|d| d.union(&r));
+    }
     // To an adjustment dialog's preview: only what the view shows now (the rest as it moves there).
     if damage.is_some()
         && let Some(r) = seen.filter(|s| s.0 == revision).and_then(|s| crate::adjust_preview::switch_region(app, id, revision, s.1 ^ display_key, raw_key))
@@ -531,6 +541,27 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
         crate::render_path::layer_fit(app, fit);
     }
     if present && current {
+        // A Large Brush Mode stroke painted into its layer: recomposite where it drew.
+        if let Some(r) = live_damage {
+            let r = gpu.refresh_with(id.0, &doc, Some(r), display.as_deref(), false);
+            app.perf.record_refresh(&r);
+            if !r.kind.starts_with("gpu") {
+                // The compositor can't draw it: lay the strokes over the canvas instead.
+                gpu.stroke_to_overlay(id.0);
+            }
+        }
+        // A big Large Brush Mode stroke landing: its next band of rows.
+        if let Some(r) = super::strokes::step_band(app, ctx, &gpu, &doc, display.as_deref()) {
+            app.perf.record_refresh(&r);
+            if r.kind.starts_with("gpu") {
+                return true;
+            }
+            // The GPU couldn't: redraw the canvas as usual.
+            if let Some(cache) = app.canvases.get_mut(&(id, GPU_OUTPUT)) {
+                cache.revision = 0;
+            }
+            return false;
+        }
         // An adjustment preview composited where the view was: catch up where it moved to.
         if let Some(r) = crate::adjust_preview::uncovered(app, id, raw_key, visible) {
             let r = gpu.refresh(id.0, &doc, Some(r), display.as_deref());
@@ -544,6 +575,7 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
         // Use the normal refresh path so CPU fallback and pending redraws stay synchronized.
         damage = crate::blend_preview::uncovered(app, id, revision, raw_key, blend_visible);
         if damage.is_none() {
+            super::strokes::committed_shown(app, id);
             return true;
         }
     }
@@ -564,8 +596,25 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     let budget_start = crate::gpu_canvas::now_ms();
     gpu_budget(app, &gpu, idx, partial, visible);
     app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - budget_start;
-    let defer = crate::background_redraw::enabled(app);
-    let r = gpu.refresh_with(id.0, &doc, if partial { damage } else { None }, display.as_deref(), defer);
+    // A Large Brush Mode stroke just committed is drawn now, not in background blocks: its
+    // overlay goes in this frame, so the stroke doesn't blink out while the blocks come in.
+    let committing = super::strokes::committing(app, id);
+    // Nor while strokes are painted into layers: the CPU's background blocks don't hold them.
+    let defer = crate::background_redraw::enabled(app) && !committing && !gpu.stroke_showing();
+    // A big one lands a band of rows per frame instead (`strokes::start_bands`).
+    let banded = match damage.filter(|_| committing && partial) {
+        Some(region) => super::strokes::start_bands(app, ctx, &gpu, &doc, revision, region, raw_key, display.as_deref()),
+        None => None,
+    };
+    let r = match banded {
+        Some(r) => r,
+        None => {
+            if committing {
+                super::strokes::end_landed_in_layer(app, &gpu, id);
+            }
+            gpu.refresh_with(id.0, &doc, if partial { damage } else { None }, display.as_deref(), defer)
+        }
+    };
     app.perf.gpu_layer_fit = gpu.layer_fit();
     if r.kind == "lost" || r.kind == crate::gpu_canvas::REFRESH_OVER_BUDGET {
         // The device is gone (`gpu_status` then drops the GPU canvas) or the canvas is over the
@@ -600,12 +649,37 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     if r.kind.starts_with("gpu") {
         app.perf.gpu_uploads = r.uploads;
     }
+    if committing {
+        super::strokes::committed_shown(app, id);
+    }
     let Some(cache) = app.canvases.get_mut(&(id, GPU_OUTPUT)) else { return true };
     cache.revision = revision;
     cache.preview_key = preview_key;
     cache.on_gpu = true;
     cache.texture = None;
     true
+}
+
+/// Recomposite, now, where Large Brush Mode strokes painted into their layers of the active
+/// document drew new dabs: the canvas texture then holds them before this frame is drawn, as
+/// the overlay did (waiting for the next frame's refresh put the stroke a frame behind the pen).
+pub(crate) fn refresh_live_now(app: &mut PhotocraftApp) {
+    let Some(gpu) = app.gpu.clone() else { return };
+    let Some(idx) = app.session.active_index() else { return };
+    let Some((id, revision)) = app.session.documents().get(idx).map(|st| (st.doc.id, st.revision)) else { return };
+    // Only over a canvas that is current: otherwise the frame's own refresh takes the damage.
+    let current = app.canvases.get(&(id, GPU_OUTPUT)).is_some_and(|c| c.on_gpu && c.revision == revision);
+    if !current {
+        return;
+    }
+    let Some(r) = super::strokes::take_live_damage(app, id) else { return };
+    let (doc, _) = display_doc(app, idx);
+    let (display, _) = canvas_display(app, &doc, None);
+    let refresh = gpu.refresh_with(id.0, &doc, Some(r), display.as_deref(), false);
+    app.perf.record_refresh(&refresh);
+    if !refresh.kind.starts_with("gpu") {
+        gpu.stroke_to_overlay(id.0);
+    }
 }
 
 /// Point the wgpu compositor at what the view shows, and size its memory budget from GPU Memory,
@@ -654,6 +728,7 @@ fn apply_force_gpu(app: &PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas) -> b
     let mode = app.session.prefs().performance.effective_performance_mode();
     let (_, canvas) = crate::gpu_canvas::profile_budgets(mode, 0, 0, crate::gpu_canvas::physical_memory(), gpu.video_memory(), 0, app.gpu_oom_retries);
     gpu.set_canvas_budget(canvas);
+    gpu.set_composite_cache_cap(crate::gpu_canvas::composite_cache_cap(mode));
     force
 }
 

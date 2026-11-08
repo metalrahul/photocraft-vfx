@@ -79,6 +79,18 @@ pub fn efficient_canvas_budget(ram: Option<u64>, vram: Option<u64>) -> u64 {
     canvas_budget(ram, vram).min(efficient_share(ram, vram)).max(MIN_GPU_BUDGET)
 }
 
+/// The most the compositor's lower-stack cache (everything below the layer being painted,
+/// composited once) may hold under Performance Mode `mode`: 512 MiB (the old fixed cap), 1.5 GiB
+/// or 4 GiB. It takes at most a sixth of the layer budget either way.
+pub fn composite_cache_cap(mode: photocraft_engine::prefs::PerformanceMode) -> u64 {
+    use photocraft_engine::prefs::PerformanceMode as M;
+    match mode {
+        M::Efficient => 512 << 20,
+        M::Balanced => 3 << 29,
+        M::Maximum => 4 << 30,
+    }
+}
+
 /// The layer budget and the canvas texture budget of Performance Mode `mode`, scaled down after
 /// `oom` out-of-memory errors this session (each takes another quarter off, down to a quarter),
 /// never below [`MIN_GPU_BUDGET`].

@@ -116,9 +116,14 @@ pub fn right_erases(app: &PhotocraftApp, tool: Tool) -> bool {
 pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) -> Buttons {
     if crate::brush_mode_menu::blocks_canvas(app, &response.ctx) {
         app.secondary_erase = false;
+        // A barrel press while the menu is up is not one to open the picker for later.
+        if let Some(n) = app.services.barrel_presses.as_ref().map(|f| f()) {
+            response.ctx.data_mut(|d| d.insert_temp(egui::Id::new("pc_barrel_presses_seen"), n));
+        }
         return Buttons::default();
     }
     let physical_right = app.services.right_button_down.as_ref().is_some_and(|f| f());
+    let (barrel_hover_press, barrel_tip_click, barrel_contact) = barrel_clicks(app, response, physical_right, tool);
     let (mods, mut right_down) = response.ctx.input(|i| (i.modifiers, i.pointer.secondary_down()));
     right_down |= physical_right;
     let right_started = response.drag_started_by(PointerButton::Secondary) || (physical_right && response.drag_started());
@@ -171,13 +176,16 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) 
     }
     let right_stroke = erase && app.drag.is_some();
     let right_start = erase && right_started;
-    let right_click = response.secondary_clicked();
+    // ⌥ with the side button is the brush resize (the drag that follows), not the picker.
+    // The press opened the picker already; the release that ends it doesn't open it again.
+    let barrel_click = (barrel_hover_press || (barrel_tip_click && app.ui.brush_picker.is_none())) && !crate::brush_resize::is_right_gesture(sticky);
+    let right_click = response.secondary_clicked() || barrel_click;
     if right_click
         && !erase
         && !layer_menu
         && !crate::color_hud::is_open(&app.ui)
         && right_click_picker(tool)
-        && let Some(p) = response.interact_pointer_pos()
+        && let Some(p) = response.interact_pointer_pos().or_else(|| response.ctx.input(|i| i.pointer.hover_pos()))
     {
         crate::brush_picker::open(&mut app.ui, &response.ctx, [p.x, p.y]);
     }
@@ -185,10 +193,67 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) 
     app.secondary_erase = right_start || erase_click;
     let right_drag = right_stroke || resizing;
     Buttons {
-        started: response.drag_started_by(PointerButton::Primary) || right_start || resize_start,
-        dragged: response.dragged_by(PointerButton::Primary) || (right_drag && right_dragged),
+        // A press made by the side button (Windows Ink reports it as a contact) never paints.
+        started: (response.drag_started_by(PointerButton::Primary) && !barrel_contact) || right_start || resize_start,
+        dragged: (response.dragged_by(PointerButton::Primary) && !barrel_contact) || (right_drag && right_dragged),
         stopped: response.drag_stopped_by(PointerButton::Primary) || (right_drag && right_stopped),
-        clicked: response.clicked() || erase_click,
+        // A tip tap with the side button held is the right-click above, not a dab.
+        clicked: (response.clicked() && !barrel_tip_click) || erase_click,
+    }
+}
+
+/// A pen's side (barrel) button is a right-click too. Windows doesn't send it as one: winit
+/// turns the pen into touches, so egui never sees a secondary button. The tablet hook counts
+/// the barrel presses (one let go before the next frame included) and wakes the UI on each, so
+/// a press with the pen hovering still opens the picker. A tip tap with the button held (it is
+/// already let go when the tap's release frame runs) is read from the press frame.
+fn barrel_clicks(app: &PhotocraftApp, response: &Response, physical_right: bool, tool: Tool) -> (bool, bool, bool) {
+    let presses = app.services.barrel_presses.as_ref().map(|f| f());
+    let seen_id = egui::Id::new("pc_barrel_presses_seen");
+    let seen = response.ctx.data(|d| d.get_temp::<u32>(seen_id));
+    if let Some(n) = presses {
+        response.ctx.data_mut(|d| d.insert_temp(seen_id, n));
+    }
+    let barrel_id = egui::Id::new("pc_barrel_was_down");
+    let barrel_was = response.ctx.data(|d| d.get_temp::<bool>(barrel_id)).unwrap_or(false);
+    response.ctx.data_mut(|d| d.insert_temp(barrel_id, physical_right));
+    let barrel_edge = match (presses, seen) {
+        (Some(n), Some(s)) => n != s,
+        (Some(_), None) => false,
+        (None, _) => physical_right && !barrel_was,
+    };
+    let at_press_id = egui::Id::new("pc_barrel_at_press");
+    let (primary_busy, primary_pressed) = response.ctx.input(|i| (i.pointer.primary_down() || i.pointer.primary_released(), i.pointer.primary_pressed()));
+    if primary_pressed {
+        response.ctx.data_mut(|d| d.insert_temp(at_press_id, physical_right));
+    }
+    let barrel_at_press = response.ctx.data(|d| d.get_temp::<bool>(at_press_id)).unwrap_or(false);
+    // Windows Ink reports a side-button press with the pen hovering as a contact (pointer down
+    // with the second button), so egui sees the tip go down too: the press itself is the click.
+    let barrel_hover_press = barrel_edge && response.hovered() && app.drag.is_none();
+    let barrel_tip_click = response.clicked() && (physical_right || barrel_at_press);
+    if barrel_edge || barrel_tip_click || response.secondary_clicked() {
+        pen_log(&format!(
+            "[pen] canvas: barrel press {barrel_edge}, tip click {barrel_tip_click}, mouse right-click {} -> picker {} (hovered {}, pointer {:?}, tip busy {primary_busy}, stroke {}, tool {tool:?} has picker {})",
+            response.secondary_clicked(),
+            barrel_hover_press || barrel_tip_click,
+            response.hovered(),
+            response.ctx.input(|i| i.pointer.hover_pos()),
+            app.drag.is_some(),
+            right_click_picker(tool),
+        ));
+    }
+    (barrel_hover_press, barrel_tip_click, barrel_at_press)
+}
+
+/// `PHOTOCRAFT_PEN_DEBUG` (a file path, or `1` for `pen_debug.txt`): append a line about a pen
+/// side-button press, alongside the tablet hook's own lines.
+fn pen_log(line: &str) {
+    use std::io::Write;
+    let Some(v) = std::env::var_os("PHOTOCRAFT_PEN_DEBUG").filter(|v| !v.is_empty() && v != "0") else { return };
+    let path: std::path::PathBuf = if v == "1" { "pen_debug.txt".into() } else { v.into() };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
     }
 }
 

@@ -231,6 +231,12 @@ impl Perf {
     /// Record a canvas refresh and any GPU measurement that came back with it.
     pub fn record_refresh(&mut self, r: &Refresh) {
         self.record(r.kind, r.px, r.composite_ms, r.upload_ms);
+        self.stage.tiles += r.uploads;
+        self.stage.tiles_ready += r.ready;
+        self.stage.evicted += r.evicted;
+        if r.layer_mb > 0 {
+            self.stage.layer_mb = r.layer_mb;
+        }
         if let Some(t) = r.gpu {
             self.record_gpu(t);
         }

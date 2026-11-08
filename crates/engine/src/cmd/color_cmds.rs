@@ -1090,6 +1090,20 @@ fn color_settings(s: &mut Session, p: &Value) -> Result<Value> {
         None => {}
     }
     validate_settings(&next).map_err(|msg| EngineError::BadParams { cmd: cmd.into(), msg })?;
+    // The OpenColorIO config (stored with the file-handling preferences, read by the OCIO
+    // viewer and the OCIO Colorspace adjustment): a config.ocio path or an ocio:// URI, empty
+    // for `$OCIO`, else OCIO's built-in ACES config. One that doesn't load is refused.
+    let ocio = match p.get("ocioConfig") {
+        Some(Value::String(v)) => Some(v.trim().to_string()),
+        Some(Value::Null) => Some(String::new()),
+        Some(_) => return Err(EngineError::BadParams { cmd: cmd.into(), msg: "`ocioConfig` must be a path, an ocio:// URI or empty".into() }),
+        None if p.get("reset").and_then(Value::as_bool) == Some(true) => Some(String::new()),
+        None => None,
+    };
+    if let Some(path) = ocio.filter(|v| *v != s.prefs().file_handling.ocio_config) {
+        crate::ocio_viewer::sync_config(&path).map_err(|e| EngineError::BadParams { cmd: cmd.into(), msg: format!("the OCIO config didn't load: {e}") })?;
+        s.edit_prefs(|pr| pr.file_handling.ocio_config = path);
+    }
     if next != s.color.settings {
         photocraft_compose::psblend::set_text_gamma(next.blend_text_gamma);
         s.color.settings = next;
@@ -1105,7 +1119,25 @@ fn color_settings(s: &mut Session, p: &Value) -> Result<Value> {
         "monitorDetected": !s.color.displays.is_empty(),
         "monitorStatus": s.color.monitor_status(),
         "displays": s.color.display_statuses(),
+        "ocioConfig": s.prefs().file_handling.ocio_config,
+        "ocio": ocio_status(&s.prefs().file_handling.ocio_config),
     }))
+}
+
+/// Which OpenColorIO config is in use for `path` (the preference), for Color Settings: where it
+/// comes from and its name, or why it didn't load.
+pub fn ocio_status(path: &str) -> String {
+    let source = if !path.trim().is_empty() {
+        path.trim().to_string()
+    } else if std::env::var_os("OCIO").is_some_and(|v| !v.is_empty()) {
+        "$OCIO".to_string()
+    } else {
+        "built-in ACES config".to_string()
+    };
+    match crate::ocio_viewer::sync_config(path) {
+        Ok(cfg) => format!("OCIO config: {} ({source})", cfg.name()),
+        Err(e) => format!("OCIO config: {source} didn't load: {e}"),
+    }
 }
 
 /// Resolve an embedded-profile mismatch reported when opening (the "Embedded Profile
@@ -1187,7 +1219,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "edit.colorSettings",
             "Color Settings…",
             ["Edit"],
-            r##"{"workingRgb":"srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020","workingCmyk":"coated-cmyk","workingGray":"dot-gain-20-compat|sgray|gray-gamma-2.2","policyRgb":"preserve|convert|off","policyCmyk":"preserve|convert|off","policyGray":"preserve|convert|off","askOnMismatch":bool=true,"askOnPaste":bool=true,"askOnMissing":bool=false,"intent":"relative|perceptual|saturation|absolute","blendTextGamma":1.0..2.2|bool=1.45,"bpc":bool=true,"dither":bool=true,"monitorProfile":"auto|srgb|display-p3|adobe-rgb-compat|prophoto-compat|rec2020","reset":bool=false} (working spaces and the monitor profile also accept .icc paths; monitor `auto` = the main display's profile when the platform provides it, else sRGB; the reply's `monitorStatus` says which profile is in use and why: source auto|manual|fallback, reason)"##,
+            r##"{"workingRgb":"srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020","workingCmyk":"coated-cmyk","workingGray":"dot-gain-20-compat|sgray|gray-gamma-2.2","policyRgb":"preserve|convert|off","policyCmyk":"preserve|convert|off","policyGray":"preserve|convert|off","askOnMismatch":bool=true,"askOnPaste":bool=true,"askOnMissing":bool=false,"intent":"relative|perceptual|saturation|absolute","blendTextGamma":1.0..2.2|bool=1.45,"bpc":bool=true,"dither":bool=true,"monitorProfile":"auto|srgb|display-p3|adobe-rgb-compat|prophoto-compat|rec2020","ocioConfig":text,"reset":bool=false} (ocioConfig: the OpenColorIO config for the OCIO viewer and OCIO Colorspace, a config.ocio path or an ocio:// URI, empty for $OCIO else the built-in ACES config; working spaces and the monitor profile also accept .icc paths; monitor `auto` = the main display's profile when the platform provides it, else sRGB; the reply's `monitorStatus` says which profile is in use and why: source auto|manual|fallback, reason)"##,
             always,
             color_settings,
             true,
@@ -1509,6 +1541,13 @@ mod settings_tests {
         assert!(s.execute("edit.colorSettings", json!({"workingRgb": "coated-cmyk"})).is_err());
         assert!(s.execute("edit.colorSettings", json!({"policyRgb": "sometimes"})).is_err());
         assert!(s.execute("edit.colorSettings", json!({"intent": "vivid"})).is_err());
+        // The OCIO config lives here too: one that doesn't load is refused and nothing changes.
+        assert!(s.execute("edit.colorSettings", json!({"ocioConfig": "/no/such/config.ocio"})).is_err());
+        assert_eq!(s.prefs().file_handling.ocio_config, "");
+        assert!(s.execute("edit.colorSettings", json!({"ocioConfig": 3})).is_err());
+        let r = s.execute("edit.colorSettings", json!({"ocioConfig": ""})).unwrap();
+        assert_eq!(r["ocioConfig"], "");
+        assert!(r["ocio"].as_str().is_some_and(|t| t.starts_with("OCIO config:")), "{r}");
         let r = s.execute("edit.colorSettings", json!({"workingRgb": "adobe-rgb-compat", "intent": "perceptual", "bpc": false})).unwrap();
         assert!(r["working"]["rgb"].as_str().unwrap().starts_with("Adobe RGB"));
         assert_eq!(s.color.settings.intent(), Intent::Perceptual);

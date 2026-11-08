@@ -190,11 +190,54 @@ fn sample_color(app: &mut PhotocraftApp, x: f64, y: f64, sample_layer: &str) -> 
         return None;
     }
     let size = app.ui.tool_options.eyedropper_size;
-    let v = app.run("document.sampleColor", json!({"x": x, "y": y, "size": size, "sampleLayer": sample_layer})).ok()?;
-    match serde_json::from_value::<Vec<f32>>(v).ok()?[..] {
-        [r, g, b, a] if a > 0.0 => Some([r, g, b]),
-        _ => None,
+    let params = json!({"x": x, "y": y, "size": size, "sampleLayer": sample_layer});
+    // Strokes painted into their layers: painted into a copy of the picked pixels, then the
+    // stack sampled as usual (sizes past 11 px fall back to laying their colour over the sample).
+    let in_layer = app.session.active().map(|st| super::strokes::pending_in_layer(app, st.doc.id)).unwrap_or_default();
+    // Large Brush Mode strokes still being written show as their overlays: the pick lays those
+    // over the document's own sample rather than waiting for the writes (`pending_paint`).
+    let pending = app.session.active().map(|st| st.doc.id).map(|doc| super::strokes::pending_paint(app, doc, x, y, size)).unwrap_or_default();
+    // (Laid over the canvas only: strokes in layers were painted in above, or at a big sample
+    // size laid over too.)
+    let mut pending = pending;
+    if size > 11 {
+        for s in &in_layer {
+            let n = size.clamp(1, 5) as usize;
+            let (cx, cy) = (x.floor() as f32 + 0.5, y.floor() as f32 + 0.5);
+            let side = size.clamp(1, 101) as f32;
+            let at = |i: usize| if n == 1 { 0.0 } else { (i as f32 / (n - 1) as f32 - 0.5) * (side - 1.0) };
+            let mut sum = 0.0;
+            for j in 0..n {
+                for i in 0..n {
+                    sum += super::strokes::dabs_coverage(&s.dabs, cx + at(i), cy + at(j));
+                }
+            }
+            let a = (sum / (n * n) as f32 * s.opacity).clamp(0.0, 1.0);
+            if a > 0.0 {
+                pending.push((s.paint, a));
+            }
+        }
     }
+    let painted = if in_layer.is_empty() || size > 11 { None } else { sample_with_pending(app, x, y, size, sample_layer, &in_layer) };
+    // Where no stroke still being written paints, the document's sample is already exact.
+    let v = if let Some(v) = painted {
+        v
+    } else if app.gpu_commits.is_empty() {
+        app.run("document.sampleColor", params).ok()?
+    } else {
+        app.session.execute("document.sampleColor", params).ok()?
+    };
+    let (r, g, b, a) = match serde_json::from_value::<Vec<f32>>(v).ok()?[..] {
+        [r, g, b, a] => (r, g, b, a),
+        _ => return None,
+    };
+    // Over the sample (straight colour), oldest stroke first, as the canvas lays them.
+    let (mut c, mut alpha) = ([r * a, g * a, b * a], a.clamp(0.0, 1.0));
+    for (paint, k) in pending {
+        c = std::array::from_fn(|i| paint[i] * k + c[i] * (1.0 - k));
+        alpha = k + alpha * (1.0 - k);
+    }
+    (alpha > 0.0).then(|| c.map(|v| v / alpha))
 }
 
 /// What the Eyedropper tool (and a painting tool's ⌥-click) picks at document point (x, y): its
@@ -216,4 +259,56 @@ pub(crate) fn alt_loads_mixer(tool: Tool, mods: egui::Modifiers) -> bool {
 }
 pub(crate) fn alt_picks(tool: Tool, mods: egui::Modifiers) -> bool {
     alt_samples(tool, mods) || alt_loads_mixer(tool, mods)
+}
+
+/// `document.sampleColor` at (x, y) with the Large Brush Mode strokes still being written into
+/// their layers (`in_layer`, oldest first) painted into a copy of the sampled pixels, as the
+/// stroke buffer lays them (Normal paint over the layer's pixel, or its colour alone where the
+/// layer's transparency is locked). `None` when there is nothing to sample.
+fn sample_with_pending(
+    app: &PhotocraftApp,
+    x: f64,
+    y: f64,
+    size: u32,
+    sample_layer: &str,
+    in_layer: &[super::strokes::PendingInLayer],
+) -> Option<serde_json::Value> {
+    use photocraft_engine::sample_cmds::{SampleLayers, sample_color, sample_rect};
+    let st = app.session.active()?;
+    let mut doc = (*st.doc).clone();
+    let rect = sample_rect(x, y, size, doc.bounds())?;
+    for s in in_layer {
+        let Some(surf) = doc.layer_mut(s.layer).and_then(|l| l.surface_mut()) else { continue };
+        let n = surf.channels();
+        if n < 4 {
+            continue;
+        }
+        let mut px = vec![0.0f32; n];
+        for py in rect.y0..rect.y1 {
+            for qx in rect.x0..rect.x1 {
+                let a = (super::strokes::dabs_coverage(&s.dabs, qx as f32 + 0.5, py as f32 + 0.5) * s.opacity).clamp(0.0, 1.0);
+                if a <= 0.0 {
+                    continue;
+                }
+                surf.read_pixel(qx, py, &mut px);
+                let la = px.get(3).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+                if s.lock {
+                    for (v, p) in px.iter_mut().zip(s.paint) {
+                        *v = *v * (1.0 - a) + p * a;
+                    }
+                } else {
+                    let out = a + la * (1.0 - a);
+                    for (v, p) in px.iter_mut().zip(s.paint) {
+                        *v = if out > 0.0 { (p * a + *v * la * (1.0 - a)) / out } else { 0.0 };
+                    }
+                    if let Some(alpha) = px.get_mut(3) {
+                        *alpha = out;
+                    }
+                }
+                surf.write_pixel(qx, py, &px);
+            }
+        }
+    }
+    let which = SampleLayers::parse(sample_layer).unwrap_or_default();
+    Some(serde_json::json!(sample_color(&doc, st.active_layer, x, y, size, which)))
 }

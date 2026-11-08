@@ -14,7 +14,7 @@ impl PhotocraftApp {
         stages.ui_ms = ui_ms;
         let stages = self.slow_frames.finish(stages, gpu_canvas::now_ms(), self.perf.gpu, self.perf.gpu_ms);
         let info = &self.perf.gpu_info;
-        self.stroke_trace.frame(&stages, self.live_stroke.is_some(), || {
+        self.stroke_trace.frame(&stages, self.live_stroke.is_some() || self.gpu_stroke.is_some(), || {
             let gpu = format!("{} {}", info.backend, info.adapter).trim().to_string();
             if info.present.is_empty() { gpu } else { format!("{gpu}, {}", info.present) }
         });

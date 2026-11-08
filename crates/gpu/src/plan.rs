@@ -55,10 +55,17 @@ pub struct Plan<'a> {
 
 /// Build the pass list for `doc`.
 pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
+    plan_live(doc, &[])
+}
+
+/// [`plan`], with layers a Large Brush Mode stroke paints into on the GPU covering where it
+/// paints (`live`: layer and document rect) as well as their own pixels.
+pub fn plan_live<'a>(doc: &'a Document, live: &[(LayerId, Rect)]) -> Result<Plan<'a>, Unsupported> {
     if doc.mode == photocraft_color::ColorMode::Multichannel {
         return Err(Unsupported("Multichannel inks (printed on the CPU)".into()));
     }
     let mut p = Planner::new(DocCtx::of(doc));
+    p.live = live.to_vec();
     let root = p.clear();
     // Start at the topmost layer that hides everything beneath it (an opaque fill layer): the
     // layers below can't change the result, so they cost no passes or uploads.

@@ -211,6 +211,13 @@ pub struct ToolOptions {
     /// Pencil › Auto Erase: a stroke that starts on the foreground colour paints the background colour.
     #[serde(default)]
     pub pencil_auto_erase: bool,
+    /// Brush › Large Brush Mode: the stroke shows as a GPU overlay while drawn and is rendered
+    /// at full precision on release (`canvas::GpuStroke`).
+    pub large_brush_mode: bool,
+    /// Brush and Pencil › Intensity on a 32-bit document: the paint colour times 2^this (stops),
+    /// above 1.0 for HDR glows and light passes (Photoshop's 32-bit Color Picker Intensity).
+    #[serde(default)]
+    pub hdr_intensity: f32,
     /// Brush › Mode: Clear, which erases with the Brush (Photoshop's painting-only mode, #3439).
     /// Not a blend mode, so it is kept beside the brush's `mode` rather than in it.
     #[serde(default)]
@@ -462,6 +469,8 @@ impl Default for ToolOptions {
             cr_anti_alias: true,
             zoom_scrubby: true,
             pencil_auto_erase: false,
+            large_brush_mode: false,
+            hdr_intensity: 0.0,
             brush_clear: false,
             pencil_clear: false,
             eraser_mode: default_eraser_mode(),

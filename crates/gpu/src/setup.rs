@@ -165,6 +165,12 @@ impl Compositor {
             cmyk: 0,
             health: None,
             timer: None,
+            upload_region: None,
+            live: None,
+            live_kit: None,
+            render_region: Rect::EMPTY,
+            live_limit: None,
+            live_over: false,
         }
         .with_texture_limit(device_max)
     }
@@ -221,9 +227,17 @@ impl Compositor {
     /// flight during a refresh stay within about a quarter more.
     pub fn set_memory_budget(&mut self, bytes: u64) {
         let caches = (FX_BUDGET as u64).min(bytes / 4);
-        self.prefix.set_budget((caches / 2).min(prefix::MAX_BYTES));
-        self.fx_budget = caches.saturating_sub(self.prefix.budget());
-        self.resident_budget = bytes.saturating_sub(caches);
+        let mut lower = (caches / 2).min(prefix::MAX_BYTES);
+        let fx = caches.saturating_sub(lower);
+        if self.prefix.cap() > prefix::MAX_BYTES {
+            // A raised cap (Performance Mode) lets the lower-stack chunks take up to a sixth of
+            // the budget, from the layer pages: while a stroke paints one layer, everything below
+            // it is served from these chunks instead of being recomposited.
+            lower = lower.max((bytes / 6).min(self.prefix.cap()));
+        }
+        self.prefix.set_budget(lower);
+        self.fx_budget = fx;
+        self.resident_budget = bytes.saturating_sub(fx).saturating_sub(self.prefix.budget());
         self.lent = 0;
         self.exact_resident = false;
         self.lend();
@@ -264,6 +278,23 @@ impl Compositor {
     /// Bytes held by reusable lower-stack chunks, within the overall cache allowance.
     pub fn composite_cache_bytes(&self) -> u64 {
         self.prefix.bytes()
+    }
+
+    /// The most lower-stack reuse may hold (512 MiB by default, up to 8 GiB): a larger cap lets
+    /// [`Compositor::set_memory_budget`] give the chunks up to a sixth of the budget. Applies at
+    /// the next `set_memory_budget`.
+    pub fn set_composite_cache_cap(&mut self, bytes: u64) {
+        self.prefix.set_cap(bytes);
+    }
+
+    /// Upload only the changed layer tiles that meet `region` (`None`: every changed tile, the
+    /// default). The others keep the pixels the GPU holds, counted in
+    /// [`Stats::tiles_deferred`], and upload when a render's region (or this one) reaches them.
+    /// A render of `region` itself then reads only up-to-date tiles, unless a layer effect
+    /// reaches past it: callers use it for edits without effects. A big Large Brush Mode stroke
+    /// lands like this, a band of rows per frame.
+    pub fn set_upload_region(&mut self, region: Option<Rect>) {
+        self.upload_region = region;
     }
 
     /// Cap lower-stack reuse (default at most 512 MiB); zero disables it. The released allowance

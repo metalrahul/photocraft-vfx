@@ -405,7 +405,7 @@ fn brush_cursor_follows_pen_orientation_6350() {
         let pen = h.state().stylus.sample().expect("simulated pen reaches the canvas");
         assert_eq!((pen.tilt_y, pen.rotation), (-45.0, 90.0));
         let point = photocraft_paint::StrokePoint { tilt_y: pen.tilt_y, rotation: pen.rotation, ..Default::default() };
-        let step = photocraft_paint::dynamics::StepInput { point, direction: 0.0, initial_direction: 0.0, step: 0 };
+        let step = photocraft_paint::dynamics::StepInput { point, direction: 0.0, initial_direction: 0.0, step: 0, speed: 0.0 };
         let mut dabs = Vec::new();
         photocraft_paint::dynamics::DabBuilder::new(&h.state().session.tools.brush).build(&step, &mut dabs);
         assert_eq!(dabs.len(), 1);

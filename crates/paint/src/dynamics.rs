@@ -222,7 +222,15 @@ pub struct StepInput {
     pub initial_direction: f32,
     /// Sequential step number (0 = first).
     pub step: u64,
+    /// How fast the pen moves here, 0 (still) to 1 (very fast), smoothed: [`Control::PenSpeed`].
+    pub speed: f32,
 }
+
+/// Pen speed (document pixels per millisecond) at which [`Control::PenSpeed`] reads 63 % of the
+/// way to fast: 1.5 px/ms is a brisk 1500 px a second.
+const SPEED_SCALE: f64 = 1.5;
+/// Time constant (ms) of the speed's smoothing: the dab rate jitters, a pen's speed doesn't.
+const SPEED_SMOOTH_MS: f64 = 30.0;
 
 /// Walks a polyline and emits steps every `step_len(point)` pixels, plus airbrush steps in time.
 #[derive(Clone, Debug)]
@@ -246,6 +254,9 @@ pub struct PathWalker {
     grid: Option<f64>,
     /// The grid cell of the last pixel-grid step, so the next segment joins it (#8040).
     cell: Option<(f64, f64)>,
+    /// The last step's point and the smoothed pen speed there (px/ms), for [`StepInput::speed`].
+    speed_from: Option<StrokePoint>,
+    speed_now: f64,
 }
 
 impl PathWalker {
@@ -263,6 +274,8 @@ impl PathWalker {
             speed_acc: 0.0,
             grid: None,
             cell: None,
+            speed_from: None,
+            speed_now: 0.0,
         }
     }
 
@@ -338,7 +351,21 @@ impl PathWalker {
         if let Some(g) = self.grid {
             self.cell = Some((grid_cell(point.x, g), grid_cell(point.y, g)));
         }
-        let s = StepInput { point, direction: self.dir, initial_direction: self.initial_dir.unwrap_or(self.dir), step: self.step };
+        // Pen speed from the stroke's times, smoothed exponentially; points without times read
+        // as still (full value).
+        if let Some(prev) = self.speed_from {
+            let dt = point.time - prev.time;
+            if dt > 0.0 && dt.is_finite() {
+                let v = (point.x - prev.x).hypot(point.y - prev.y) / dt;
+                if v.is_finite() {
+                    let k = 1.0 - (-dt / SPEED_SMOOTH_MS).exp();
+                    self.speed_now += (v - self.speed_now) * k;
+                }
+            }
+        }
+        self.speed_from = Some(point);
+        let speed = (1.0 - (-self.speed_now.max(0.0) / SPEED_SCALE).exp()) as f32;
+        let s = StepInput { point, direction: self.dir, initial_direction: self.initial_dir.unwrap_or(self.dir), step: self.step, speed };
         self.step += 1;
         out(s);
     }
@@ -442,6 +469,7 @@ pub fn control_value(c: Control, fade_steps: u32, s: &StepInput) -> f32 {
         Control::PenTilt => 1.0 - (p.tilt_x.hypot(p.tilt_y) / 90.0).clamp(0.0, 1.0),
         Control::StylusWheel => p.wheel.clamp(0.0, 1.0),
         Control::Rotation => (p.rotation.rem_euclid(360.0)) / 360.0,
+        Control::PenSpeed => 1.0 - s.speed.clamp(0.0, 1.0),
     }
 }
 
@@ -451,7 +479,7 @@ pub fn dynamic_value(d: &Dynamic, s: &StepInput) -> f32 {
     let v = control_value(d.control, d.fade_steps, s);
     match d.control {
         Control::Off | Control::InitialDirection | Control::Direction => v,
-        Control::Fade | Control::PenPressure | Control::PenTilt | Control::StylusWheel | Control::Rotation => d.curve.eval(v),
+        Control::Fade | Control::PenPressure | Control::PenTilt | Control::StylusWheel | Control::Rotation | Control::PenSpeed => d.curve.eval(v),
     }
 }
 
@@ -471,6 +499,7 @@ pub fn control_angle(c: Control, fade_steps: u32, s: &StepInput) -> f32 {
         }
         Control::StylusWheel => 360.0 * p.wheel.clamp(0.0, 1.0),
         Control::Rotation => p.rotation,
+        Control::PenSpeed => 360.0 * s.speed.clamp(0.0, 1.0),
         Control::InitialDirection => s.initial_direction.to_degrees(),
         Control::Direction => s.direction.to_degrees(),
     }
@@ -544,6 +573,10 @@ pub fn base_diameter(b: &BrushSettings, s: &StepInput) -> f32 {
     if sd.enabled && sd.size.control != Control::Off {
         let min = sd.size.minimum.clamp(0.0, 1.0);
         f = min + (1.0 - min) * dynamic_value(&sd.size, s);
+        // Speed Taper with the pressure-for-size button: both (pressure alone would replace it).
+        if sd.size.control == Control::PenSpeed && b.pressure_size {
+            f *= s.point.pressure.clamp(0.0, 1.0);
+        }
     } else if b.pressure_size {
         f = s.point.pressure.clamp(0.0, 1.0);
     }
@@ -566,7 +599,7 @@ impl DabBuilder {
     }
 
     pub fn step_len(&self, p: &StrokePoint) -> f64 {
-        let s = StepInput { point: *p, direction: 0.0, initial_direction: 0.0, step: 0 };
+        let s = StepInput { point: *p, direction: 0.0, initial_direction: 0.0, step: 0, speed: 0.0 };
         let d = base_diameter(&self.brush, &s).max(1.0);
         f64::from(d * self.brush.spacing.max(0.01)).max(0.5)
     }

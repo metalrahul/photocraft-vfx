@@ -656,6 +656,7 @@ impl LiveDab {
             mixer: None,
             cmd: self.cmd,
             base,
+            base_doc: std::sync::Weak::new(),
             params: self.params,
             seed: None,
             points: self.points,

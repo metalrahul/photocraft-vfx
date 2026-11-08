@@ -335,3 +335,27 @@ fn advanced_blending_falls_back_to_the_cpu() {
     d.layers.push(Layer::group("g", vec![inner]));
     assert!(plan(&d).is_err(), "knockout inside a group");
 }
+
+/// A Large Brush Mode stroke painting an empty layer on the GPU: the layer has no pixels, so
+/// it isn't planned at all, until the stroke's rect is given (`plan_live`); then it is, over
+/// that rect.
+#[test]
+fn a_live_stroke_plans_its_empty_layer_where_it_paints() {
+    let mut doc = Document::new("live", Size::new(4096, 4096), ColorMode::Rgb, SampleType::F32);
+    let mut base = Layer::raster("base", photocraft_color::PixelFormat::RGBA32F);
+    if let Some(s) = base.surface_mut() {
+        s.fill_rect(Rect::new(0, 0, 4096, 4096), &[0.5, 0.5, 0.5, 1.0]);
+    }
+    let empty = Layer::raster("empty", photocraft_color::PixelFormat::RGBA32F);
+    let id = empty.id;
+    doc.layers = vec![base, empty];
+    let uses = |p: &Plan<'_>| p.passes.iter().filter(|p| p.tex.as_ref().is_some_and(|t| t.layer == id)).count();
+    assert_eq!(uses(&plan(&doc).expect("plans")), 0, "an empty layer costs nothing");
+    let at = Rect::new(100, 200, 900, 700);
+    let live = plan_live(&doc, &[(id, at)]).expect("plans");
+    assert!(uses(&live) > 0, "the live layer is planned");
+    assert!(
+        live.passes.iter().filter(|p| p.tex.as_ref().is_some_and(|t| t.layer == id)).all(|p| p.clip.is_none_or(|c| c.contains_rect(&at))),
+        "over the stroke's rect"
+    );
+}

@@ -51,6 +51,12 @@ impl PhotocraftApp {
             move_blocked: false,
             tool_override: None,
             live_stroke: None,
+            gpu_stroke: None,
+            gpu_commits: std::collections::VecDeque::new(),
+            gpu_landed: Vec::new(),
+            gpu_commit_landing: false,
+            gpu_band: None,
+            gpu_live_damage: None,
             committed_stroke: None,
             retouch_from_live: false,
             trail: None,
@@ -259,4 +265,4 @@ impl eframe::App for PhotocraftApp {
 }
 
 #[cfg(test)]
-mod clipboard_tests;
+mod clipboard_tests;

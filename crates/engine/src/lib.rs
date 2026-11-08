@@ -258,6 +258,10 @@ pub struct Session {
     /// Color Sampler points dropped by the last canvas-size change (crop, Canvas Size, Image Size,
     /// rotation), for the status message. Read with [`Session::take_samplers_removed`].
     samplers_removed: usize,
+    /// Where the latest recorded edit's time went, in ms: applying the change (with copying the
+    /// document), comparing it for the redraw area, recording and trimming history, and the
+    /// whole edit (0 on the web). A big Large Brush Mode stroke's landing reports these.
+    pub edit_timing: [f64; 4],
     /// The canvas-geometry map the next [`Session::edit`] applies to the Color Sampler points (crop,
     /// Canvas Size, Image Size, rotation set it just before their edit). Consumed by the edit.
     sampler_map: Option<photocraft_geom::Affine>,
