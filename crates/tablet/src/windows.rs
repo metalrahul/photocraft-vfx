@@ -17,33 +17,6 @@ static BARREL_PRESSES: AtomicU32 = AtomicU32::new(0);
 /// Wakes the UI when the barrel button changes: a press with the pen held still sends no
 /// event winit passes on, so without this the canvas would not see it until the pen moves.
 static WAKER: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
-static SEEN_POINTER: AtomicBool = AtomicBool::new(false);
-
-/// `PHOTOCRAFT_PEN_DEBUG=<file>`: append the pen's pointer messages and barrel changes to that
-/// file (`1` writes `pen_debug.txt` in the working folder). A file, not stderr: the release build
-/// has no console.
-pub fn pen_debug() -> bool {
-    pen_debug_path().is_some()
-}
-
-fn pen_debug_path() -> Option<&'static std::path::Path> {
-    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let v = std::env::var_os("PHOTOCRAFT_PEN_DEBUG").filter(|v| !v.is_empty() && v != "0")?;
-        Some(if v == "1" { "pen_debug.txt".into() } else { v.into() })
-    })
-    .as_deref()
-}
-
-/// Append one line to the pen debug file (see [`pen_debug`]); nothing when it is off.
-pub fn pen_log(line: &str) {
-    use std::io::Write;
-    if let Some(path) = pen_debug_path()
-        && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
-    {
-        let _ = writeln!(f, "{line}");
-    }
-}
 
 /// Call `wake` (from the UI thread's hook) whenever the barrel button goes down or up.
 pub fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
@@ -55,14 +28,11 @@ pub fn barrel_presses() -> u32 {
     BARREL_PRESSES.load(Ordering::Relaxed)
 }
 
-fn set_barrel(down: bool, why: &str) {
+fn set_barrel(down: bool) {
     let was = BARREL_DOWN.swap(down, Ordering::Relaxed);
     if down != was {
         if down {
             BARREL_PRESSES.fetch_add(1, Ordering::Relaxed);
-        }
-        if pen_debug() {
-            pen_log(&format!("[pen] barrel {} ({why})", if down { "DOWN" } else { "up" }));
         }
         if let Some(wake) = WAKER.get() {
             wake();
@@ -171,19 +141,10 @@ unsafe extern "system" fn get_msg_proc(code: i32, w_param: usize, l_param: isize
                     (GetPointerPenInfo(pointer_id, &mut info) != 0).then_some(info.pen_flags)
                 };
                 let is_barrel = is_barrel_pressed(pen_flags, pointer_message_flags);
-                if pen_debug()
-                    && (!SEEN_POINTER.swap(true, Ordering::Relaxed) || msg.message == WM_POINTERDOWN || is_barrel != BARREL_DOWN.load(Ordering::Relaxed))
-                {
-                    let kind = if msg.message == WM_POINTERDOWN { "down" } else { "update" };
-                    pen_log(&format!("[pen] WM_POINTER {kind}: id {pointer_id} flags {pointer_message_flags:#06x} pen_flags {pen_flags:?} (None = not a pen)"));
-                }
-                set_barrel(is_barrel, "pointer message");
+                set_barrel(is_barrel);
             }
             WM_POINTERUP | WM_POINTERLEAVE => {
-                if pen_debug() {
-                    pen_log(if msg.message == WM_POINTERUP { "[pen] WM_POINTER up (tip lifted)" } else { "[pen] WM_POINTER leave" });
-                }
-                set_barrel(false, "pointer up/leave");
+                set_barrel(false);
             }
             _ => {}
         }
@@ -211,9 +172,6 @@ impl Monitor {
         };
         if hook.is_null() {
             return Err(crate::Error::Platform("SetWindowsHookExW returned null".into()));
-        }
-        if pen_debug() {
-            pen_log("[pen] pointer hook installed; waiting for pen messages");
         }
         Ok(Self { hook })
     }
