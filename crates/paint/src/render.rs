@@ -470,6 +470,11 @@ impl BrushContext {
 // Sparse stroke buffer
 // ---------------------------------------------------------------------------
 
+/// One block of a parallel stroke: its key, the dabs reaching it (stroke order) and the
+/// coverage tiles it owns while it works (key, tile, touched).
+#[cfg(not(target_arch = "wasm32"))]
+type BlockWork = ((i32, i32), Vec<usize>, Vec<((i32, i32), Option<CovTile>, bool)>);
+
 #[derive(Clone, Debug)]
 struct CovTile {
     cov: Vec<f32>,
@@ -932,7 +937,7 @@ impl StrokeRenderer {
             return false;
         }
         let rects: Vec<Rect> = dabs.iter().map(|d| self.ctx.dab_rect(d, false)).collect();
-        let area = rects.iter().fold(0usize, |a, r| a.saturating_add(r.width().max(0) as usize * r.height().max(0) as usize));
+        let area = rects.iter().fold(0usize, |a, r| a.saturating_add(r.width() as usize * r.height() as usize));
         if !parallel(area) {
             return false;
         }
@@ -962,7 +967,7 @@ impl StrokeRenderer {
         }
         // Each block owns its tiles while it works (those already in the map, and any it starts).
         let per = BLOCK / COV_TILE;
-        let mut work: Vec<((i32, i32), Vec<usize>, Vec<((i32, i32), Option<CovTile>, bool)>)> = blocks
+        let mut work: Vec<BlockWork> = blocks
             .into_iter()
             .map(|(b, list)| {
                 let tiles = (0..per)

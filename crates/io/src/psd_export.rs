@@ -402,6 +402,26 @@ impl Ex {
         }
     }
 
+    /// Warnings for adjustment settings a regenerated PSD block can't hold.
+    fn lossy_adjustment_warnings(&mut self, l: &Layer, a: &photocraft_doc::Adjustment) {
+        // Photoshop's Curves are 0..1 point curves, channels first: a Nuke
+        // ColorLookup-style range, held ends or master-first order don't carry over.
+        if matches!(a, photocraft_doc::Adjustment::Curves { lookup, .. } if !lookup.is_default()) {
+            self.warnings.push(format!(
+                "layer \"{}\": Curves range, held ends and master-first order are not saved to PSD (points above 1.0 are clipped); save as .pcraft to keep them",
+                l.name
+            ));
+        }
+        // Photoshop's `clrL` descriptor has no interpolation setting, so the
+        // reopened layer renders trilinear.
+        if matches!(a, photocraft_doc::Adjustment::ColorLookup { tetrahedral: true, .. }) {
+            self.warnings.push(format!(
+                "layer \"{}\": Color Lookup tetrahedral interpolation is saved as trilinear (PSD has no interpolation setting)",
+                l.name
+            ));
+        }
+    }
+
     /// Content blocks for `l`: preserved raw blocks (with `psd_raw`
     /// overrides) plus regenerated adjustment/fill blocks. A preserved
     /// adjustment or fill block is reused verbatim while it still decodes to
@@ -480,22 +500,7 @@ impl Ex {
                     if w.is_empty() {
                         self.warnings.push(format!("layer \"{}\": {} adjustment is not yet written to PSD", l.name, a.label()));
                     }
-                    // Photoshop's Curves are 0..1 point curves, channels first: a Nuke
-                    // ColorLookup-style range, held ends or master-first order don't carry over.
-                    if matches!(a, photocraft_doc::Adjustment::Curves { lookup, .. } if !lookup.is_default()) {
-                        self.warnings.push(format!(
-                            "layer \"{}\": Curves range, held ends and master-first order are not saved to PSD (points above 1.0 are clipped); save as .pcraft to keep them",
-                            l.name
-                        ));
-                    }
-                    // Photoshop's `clrL` descriptor has no interpolation setting, so the
-                    // reopened layer renders trilinear.
-                    if matches!(a, photocraft_doc::Adjustment::ColorLookup { tetrahedral: true, .. }) {
-                        self.warnings.push(format!(
-                            "layer \"{}\": Color Lookup tetrahedral interpolation is saved as trilinear (PSD has no interpolation setting)",
-                            l.name
-                        ));
-                    }
+                    self.lossy_adjustment_warnings(l, a);
                     regenerated.extend(w);
                 }
             }
