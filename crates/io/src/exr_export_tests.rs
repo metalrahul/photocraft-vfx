@@ -38,8 +38,7 @@ fn half_mask() -> LayerMask {
 }
 
 fn collect(doc: &Document, groups: GroupExport) -> (Vec<ExportLayer>, Vec<String>, Vec<String>) {
-    let mut c = Collector { doc, bounds: doc.bounds(), groups, names: HashSet::new(), pixels: Vec::new(), masks: Vec::new() };
-    c.names.insert(BEAUTY.to_string());
+    let mut c = Collector::new(doc, groups, NO_PROGRESS, 0.6);
     let tree = c.list(&doc.layers, true, 0);
     (tree, c.pixels.into_iter().map(|(n, _)| n).collect(), c.masks.into_iter().map(|(n, _)| n).collect())
 }
@@ -53,7 +52,7 @@ fn script(doc: &Document, groups: GroupExport) -> String {
 fn node<'a>(nk: &'a str, name: &str) -> &'a str {
     let at = nk.find(&format!(" name {name}\n")).unwrap_or_else(|| panic!("no node {name} in:\n{nk}"));
     // The node's pushes start after the previous node's closing line.
-    let start = [nk[..at].rfind("[stack 0]\n").map(|i| i + 10), nk[..at].rfind("}\n").map(|i| i + 2)].into_iter().flatten().max().unwrap_or(0);
+    let start = [nk[..at].rfind("[stack 0]\n").map(|i| i + 10), nk[..at].rfind("\n}\n").map(|i| i + 3)].into_iter().flatten().max().unwrap_or(0);
     let end = at + nk[at..].find('}').unwrap_or(0);
     &nk[start..end]
 }
@@ -108,12 +107,16 @@ fn a_layer_mask_is_an_exr_layer_on_the_merge_mask_input() {
     assert_eq!(tree[1].mask.as_deref(), Some("Top_mask"));
 
     let nk = generate_nuke_script("t.exr", &tree, 8, 6);
-    assert!(nk.contains("add_layer {Top_mask Top_mask.alpha}"), "{nk}");
+    assert!(nk.contains("add_layer {Top_mask Top_mask.red Top_mask.green Top_mask.blue Top_mask.alpha}"), "{nk}");
+    // The mask is Shuffled off the layer's bus Dot…
+    let shuffle = node(&nk, "ShuffleMask_Top");
+    assert!(shuffle.starts_with("push $NDot_Top\n") && shuffle.contains("in Top_mask"), "{shuffle}");
+    // …and multiplies the layer with a Merge mask (A = mask, B = layer)…
+    let mask = node(&nk, "Mask_Top");
+    assert!(mask.contains("push $NShuffleMask_Top\npush $NPremult_Top") && mask.contains("operation mask"), "{mask}");
+    // …before the layer merges onto the comp.
     let merge = node(&nk, "Merge_Top");
-    assert!(merge.contains("inputs 2+1") && merge.contains("maskChannelInput Top_mask.alpha"), "{merge}");
-    // Stack order: mask, then A, then B on top.
-    let mask_push = nk.find("push $NDot_Top\n").expect("the mask comes off the layer's bus Dot");
-    assert!(mask_push < nk.find(" name Merge_Top\n").unwrap_or(0));
+    assert!(merge.contains("push $NMask_Top\npush $NDot_Comp_Base") && !merge.contains("maskChannel"), "{merge}");
 }
 
 #[test]
@@ -124,7 +127,7 @@ fn a_mask_values_match_the_canvas() {
     m.density = 0.5;
     top.mask = Some(m);
     d.layers = vec![top];
-    let mut c = Collector { doc: &d, bounds: d.bounds(), groups: GroupExport::Branches, names: HashSet::new(), pixels: Vec::new(), masks: Vec::new() };
+    let mut c = Collector::new(&d, GroupExport::Branches, NO_PROGRESS, 0.6);
     let _ = c.list(&d.layers, true, 0);
     let (_, v) = &c.masks[0];
     // Density 50%: the hidden half shows at 0.5.
@@ -140,30 +143,56 @@ fn the_base_layer_mask_goes_into_its_coverage() {
     d.layers = vec![base];
     let nk = script(&d, GroupExport::Branches);
     let m = node(&nk, "Mask_Base");
-    assert!(m.contains("expr3 \"a*Base_mask.alpha\""), "{m}");
+    assert!(m.contains("operation mask"), "{m}");
+    assert!(nk.contains("push $NMask_Base\nDot {\n name Dot_Comp_Base"), "{nk}");
 }
 
 #[test]
-fn a_mask_in_a_mode_the_mask_input_cannot_match_goes_into_the_layer() {
+fn a_masked_layer_in_any_mode_is_masked_before_its_merge() {
+    let mut d = doc();
+    d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0])];
+    let mut top = raster(&d, "Top", [0.9, 0.2, 0.1, 0.8]);
+    top.blend = BlendMode::Multiply;
+    top.mask = Some(half_mask());
+    d.layers.push(top);
+    let nk = script(&d, GroupExport::Branches);
+    let merge = node(&nk, "Merge_Top");
+    assert!(merge.contains("push $NMask_Top\n") && merge.contains("operation multiply"), "{merge}");
+    // Nuke's multiply blacks out B where A is transparent; alpha masking keeps it, as the canvas.
+    assert!(merge.contains("screen_alpha true"), "{merge}");
+}
+
+#[test]
+fn a_masked_adjustment_takes_its_mask_on_its_mask_input() {
+    let mut d = doc();
+    let mut g = grade("Warm");
+    g.mask = Some(half_mask());
+    d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
+    let nk = script(&d, GroupExport::Branches);
+    // The mask is Shuffled off the bus beside the Grade, like a layer's…
+    let shuffle = node(&nk, "ShuffleMask_Warm");
+    assert!(shuffle.starts_with("push $NDot_Warm_mask\n") && shuffle.contains("in Warm_mask"), "{shuffle}");
+    // …and wired straight into its mask input, as Nuke saves one: the mask pushed first, the
+    // image on top, the channel in maskChannelMask before unpremult.
+    let grade = node(&nk, "Grade_Warm");
+    assert!(grade.contains("push $NShuffleMask_Warm\npush $NDot_Comp_Base\nGrade"), "{grade}");
+    assert!(grade.contains("inputs 1+1") && grade.contains(" maskChannelMask rgba.alpha\n unpremult rgba.alpha\n"), "{grade}");
+    assert!(!grade.contains("maskChannelInput"), "{grade}");
+    assert!(!nk.contains("Keymix"), "{nk}");
+    assert!(nk.contains("add_layer {Warm_mask Warm_mask.red"), "{nk}");
+}
+
+#[test]
+fn clipped_nodes_stack_under_their_base_column() {
     let mut d = doc();
     let base = raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]);
-    d.layers = vec![base];
-    for mode in BlendMode::LAYER_MODES.iter().chain(&BlendMode::PS_MODES).copied().filter(|m| *m != BlendMode::PassThrough) {
-        let mut top = raster(&d, "Top", [0.9, 0.2, 0.1, 0.8]);
-        top.blend = mode;
-        top.mask = Some(half_mask());
-        d.layers.truncate(1);
-        d.layers.push(top);
-        let nk = script(&d, GroupExport::Branches);
-        let merge = node(&nk, "Merge_Top");
-        if mask_input_exact(mode) {
-            assert!(merge.contains("maskChannelInput Top_mask.alpha"), "{mode:?}: {merge}");
-        } else {
-            assert!(nk.contains(" name Mask_Top\n") && !merge.contains("maskChannelInput"), "{mode:?}: {merge}");
-        }
-    }
-    assert!(mask_input_exact(BlendMode::Normal));
-    assert!(mask_input_exact(BlendMode::LinearDodge), "plus is linear in coverage");
+    let mut g = grade("Warm");
+    g.clipped = true;
+    d.layers = vec![raster(&d, "BG", [0.2; 4]), base, g];
+    let nk = script(&d, GroupExport::Branches);
+    let x = |name: &str| node(&nk, name).split("xpos ").nth(1).and_then(|t| t.lines().next()).map(str::to_string);
+    assert_eq!(x("Grade_Warm"), x("Premult_Base"), "{nk}");
+    assert_eq!(x("Merge_Base"), x("Premult_Base"), "the base merges below its own column");
 }
 
 #[test]
@@ -184,9 +213,9 @@ fn an_isolated_group_composites_its_children_then_merges_in_its_mode() {
     assert!(node(&nk, "Merge_B").contains("push $NPremult_B\npush $NDot_Comp_A"), "{nk}");
     // …which merges onto the background in the group's mode, mix and mask.
     let merge = node(&nk, "Merge_Shade");
-    assert!(merge.contains("push $NDot_Comp_BG\nMerge2"), "{merge}");
-    assert!(merge.contains("push $NMerge_B\n") || nk.contains("push $NMerge_B\nExpression"), "{merge}");
-    assert!(merge.contains("operation multiply") && merge.contains("mix 0.75"), "{merge}");
+    assert!(merge.contains("push $NMask_Shade\npush $NDot_Comp_BG"), "{merge}");
+    assert!(node(&nk, "Mask_Shade").contains("push $NShuffleMask_Shade\npush $NMerge_B"), "{nk}");
+    assert!(merge.contains("operation multiply") && merge.contains("mix 0.75") && merge.contains("screen_alpha true"), "{merge}");
     assert!(nk.contains("Shade_mask.alpha"), "{nk}");
     assert!(nk.contains(" name BD_Shade\n"), "a backdrop frames the group");
 }
@@ -280,14 +309,94 @@ fn export_writes_mask_channels_and_the_script() {
     let dir = std::env::temp_dir().join(format!("photocraft-exr-export-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("comp.exr");
-    export_multichannel_exr_with_options(&d, &path, NukeCompression::ZipScanline, true, true, true, GroupExport::Branches).expect("export");
+    export_multichannel_exr_with_options(&d, &path, NukeCompression::ZipScanline, true, true, true, GroupExport::Branches, NO_PROGRESS).expect("export");
 
     let image = exr::prelude::read_all_flat_layers_from_file(&path).expect("read back");
     let names: Vec<String> = image.layer_data[0].channel_data.list.iter().map(|c| c.name.to_string()).collect();
-    for want in ["Top_mask.A", "Top.R", "BG.A", "R", "A"] {
+    for want in ["Top_mask.R", "Top_mask.A", "Top.R", "BG.A", "R", "A"] {
         assert!(names.iter().any(|n| n == want), "{want} in {names:?}");
     }
     let nk = std::fs::read_to_string(dir.join("comp.nk")).expect("script written");
-    assert!(nk.contains("maskChannelInput Top_mask.alpha"));
+    assert!(nk.contains("operation mask") && nk.contains("in Top_mask"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn export_reports_progress_and_can_be_cancelled_before_writing() {
+    let mut d = doc();
+    d.layers = vec![raster(&d, "BG", [0.5; 4]), raster(&d, "Top", [1.0, 0.0, 0.0, 1.0])];
+    let dir = std::env::temp_dir().join(format!("photocraft-exr-progress-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let seen = std::sync::Mutex::new(Vec::<f32>::new());
+    let record = |f: f32, _: &str| {
+        seen.lock().expect("lock").push(f);
+        true
+    };
+    let path = dir.join("ok.exr");
+    export_multichannel_exr_with_options(&d, &path, NukeCompression::ZipScanline, true, true, true, GroupExport::Branches, &record).expect("export");
+    let seen = seen.into_inner().expect("lock");
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "progress only goes forward: {seen:?}");
+    assert_eq!(seen.last().copied(), Some(1.0));
+
+    // Cancelled on the second layer: an error, and no file.
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let cancel = |_: f32, _: &str| calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1;
+    let path = dir.join("cancelled.exr");
+    let r = export_multichannel_exr_with_options(&d, &path, NukeCompression::ZipScanline, true, true, true, GroupExport::Branches, &cancel);
+    assert_eq!(r, Err("cancelled".to_string()));
+    assert!(!path.exists() && !path.with_extension("nk").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn alpha_masking_is_on_for_modes_that_ignore_alpha() {
+    // Nuke's multiply and average change B where A is empty; the canvas doesn't.
+    for mode in [BlendMode::Multiply, BlendMode::Reflect] {
+        assert_eq!(merge_knobs(mode), " screen_alpha true\n", "{mode:?} ({})", mode.label());
+    }
+    // Porter-Duff operations use alpha themselves; plus, min, max and difference already leave B.
+    for mode in [BlendMode::Normal, BlendMode::LinearBurn, BlendMode::LinearDodge, BlendMode::Darken, BlendMode::Lighten, BlendMode::Difference] {
+        assert_eq!(merge_knobs(mode), "", "{mode:?} ({})", mode.label());
+    }
+}
+
+#[test]
+fn a_clipped_masked_curves_takes_its_mask_beside_its_base_column() {
+    let mut d = doc();
+    let mut g = grade("Warm");
+    g.clipped = true;
+    g.mask = Some(half_mask());
+    d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
+    let nk = script(&d, GroupExport::Branches);
+    let grade = node(&nk, "Grade_Warm");
+    assert!(grade.contains("push $NShuffleMask_Warm\npush $NPremult_Base\nGrade"), "{grade}");
+    assert!(grade.contains("inputs 1+1"), "{grade}");
+    // The base (the bottom layer here) starts the comp from the Grade.
+    assert!(nk.contains("push $NGrade_Warm\nDot {\n name Dot_Comp_Base"), "{nk}");
+}
+
+#[test]
+fn clipped_layers_and_masked_pass_through_groups_mix_with_keymix() {
+    let mut d = doc();
+    let mut base = raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]);
+    base.mask = Some(half_mask());
+    let mut g = grade("Warm");
+    g.clipped = true;
+    g.mask = Some(half_mask());
+    let mut m = raster(&d, "Mult", [0.9, 0.2, 0.1, 1.0]);
+    m.clipped = true;
+    m.blend = BlendMode::Multiply;
+    let a = raster(&d, "A", [1.0, 0.0, 0.0, 1.0]);
+    let mut folder = DocLayer::group("Folder", vec![a]);
+    folder.mask = Some(half_mask());
+    d.layers = vec![raster(&d, "BG", [0.2; 4]), base, g, m, folder];
+    let nk = script(&d, GroupExport::Branches);
+    // Only adjustments take a mask input; Merges never do.
+    assert!(!nk.contains("inputs 2+1"), "{nk}");
+    // A clipped Multiply: merged, then kept inside the base by a Keymix on the base's alpha.
+    let clip = node(&nk, "Clip_Mult");
+    assert!(clip.contains("push $NGrade_Warm\npush $NClipOp_Mult\npush $NGrade_Warm\nKeymix"), "{clip}");
+    assert!(node(&nk, "Merge_Folder").contains("Keymix"), "{nk}");
+}
+

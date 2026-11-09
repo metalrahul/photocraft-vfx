@@ -2016,7 +2016,7 @@ fn pen_speed_thins_a_fast_stroke() {
     };
     let (slow, fast) = (walk(10.0), walk(0.05));
     assert!(slow > 90.0, "a slow pen paints (nearly) full size: {slow}");
-    assert!(fast < 40.0 && fast >= 20.0, "a fast one thins towards the minimum: {fast}");
+    assert!((20.0..40.0).contains(&fast), "a fast one thins towards the minimum: {fast}");
     // No times: still.
     let still = walk(0.0);
     assert!(still > 99.0, "{still}");
