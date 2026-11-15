@@ -124,8 +124,9 @@ pub(crate) fn uniform_entry(binding: u32, size: u64) -> wgpu::BindGroupLayoutEnt
     }
 }
 
-/// The compositor's WGSL source (exposed for validation in tests).
-pub const SHADER: &str = include_str!("compose.wgsl");
+/// The compositor's WGSL source (exposed for validation in tests). PhotoCraft VFX: `vfx.wgsl` (the
+/// Nuke Merge operations, Grade and ColorLookup) is compiled with it as one module; see FORK.md.
+pub const SHADER: &str = concat!(include_str!("compose.wgsl"), "\n", include_str!("vfx.wgsl"));
 
 /// One thread's share of the compositor's pipelines: the vertex entry point (in
 /// [`vertex_shader`]) and the (kernel, target format) pairs it builds.
