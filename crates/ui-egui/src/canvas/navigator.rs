@@ -43,6 +43,7 @@ pub fn navigator_gpu_view(app: &PhotocraftApp, idx: usize, rect: Rect, ctx: &egu
         // The Navigator always shows the image in colour.
         channel: 0,
         offset: [0.0, 0.0],
+        projection: None,
         ..params
     })
 }

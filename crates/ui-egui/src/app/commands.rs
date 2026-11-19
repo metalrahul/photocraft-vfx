@@ -21,6 +21,10 @@ impl PhotocraftApp {
         if let Some(result) = mask_trash_prompt::intercept(self, id, &params) {
             return result;
         }
+        // Make Selection / Fill / Stroke Path in View › Equirectangular Live Projection.
+        if let Some(result) = crate::live_projection_path::intercept_run(self, id, &params) {
+            return result;
+        }
         // Automation input also gates every step a command runs on its behalf (`actions.play`).
         let gate = if self.automation_input && self.session.authorize.is_none() { self.services.automation_authorize } else { None };
         if gate.is_some() {

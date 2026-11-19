@@ -28,6 +28,7 @@ fn edge_texture(edge: usize, vertical: bool) -> Buffer {
 fn view(doc: u64, doc_size: [u32; 2], zoom: f32) -> ViewParams {
     let center = [doc_size[0] as f32 / 2.0, doc_size[1] as f32 / 2.0];
     ViewParams {
+        projection: None,
         doc,
         doc_size,
         zoom,

@@ -29,80 +29,84 @@ pub(super) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.painter().image(tex, rect, Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
     }
     let s = rect.width() / size.width.max(1) as f32;
-    // ⌘/Ctrl-drag over the preview draws a rectangle the view then zooms to, as in Photoshop
-    // (#6872); a plain click or drag moves the view.
-    let command = crate::workspace_ui::sticky_mods(app, ctx.input(|i| i.modifiers)).command;
-    if resp.drag_started() && command {
-        let start = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
-        ui.data_mut(|d| match start {
-            Some(p) => {
-                d.insert_temp(navigator_zoom_drag_id(), p);
+    // Live projection: the view's frustum on the latlong; a click looks there.
+    if !crate::live_projection_misc::navigator(app, ui, &ctx, &resp, idx, rect) {
+        // ⌘/Ctrl-drag over the preview draws a rectangle the view then zooms to, as in Photoshop
+        // (#6872); a plain click or drag moves the view.
+        let command = crate::workspace_ui::sticky_mods(app, ctx.input(|i| i.modifiers)).command;
+        if resp.drag_started() && command {
+            let start = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
+            ui.data_mut(|d| match start {
+                Some(p) => {
+                    d.insert_temp(navigator_zoom_drag_id(), p);
+                }
+                None => d.remove::<Pos2>(navigator_zoom_drag_id()),
+            });
+        }
+        let zoom_from = ui.data(|d| d.get_temp::<Pos2>(navigator_zoom_drag_id()));
+        if let Some(from) = zoom_from {
+            if let Some(to) = resp.interact_pointer_pos() {
+                let r = Rect::from_two_pos(from, to).intersect(rect);
+                crate::tool_feedback::draw_ants(ui.painter(), &[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()], true);
+                if resp.drag_stopped() {
+                    let doc_rect = Rect::from_min_max(((r.min - rect.min) / s).to_pos2(), ((r.max - rect.min) / s).to_pos2());
+                    let (canvas, ppp, aspect) = (app.last_canvas_rect, app.canvas_ppp(), app.ui.view.display_aspect());
+                    navigator_zoom_to(&mut app.ui.views[idx], doc_rect, [size.width, size.height], canvas.size(), ppp, aspect);
+                }
             }
-            None => d.remove::<Pos2>(navigator_zoom_drag_id()),
-        });
-    }
-    let zoom_from = ui.data(|d| d.get_temp::<Pos2>(navigator_zoom_drag_id()));
-    if let Some(from) = zoom_from {
-        if let Some(to) = resp.interact_pointer_pos() {
-            let r = Rect::from_two_pos(from, to).intersect(rect);
-            crate::tool_feedback::draw_ants(ui.painter(), &[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()], true);
-            if resp.drag_stopped() {
-                let doc_rect = Rect::from_min_max(((r.min - rect.min) / s).to_pos2(), ((r.max - rect.min) / s).to_pos2());
-                let (canvas, ppp, aspect) = (app.last_canvas_rect, app.canvas_ppp(), app.ui.view.display_aspect());
-                navigator_zoom_to(&mut app.ui.views[idx], doc_rect, [size.width, size.height], canvas.size(), ppp, aspect);
+            if resp.drag_stopped() || !resp.dragged() {
+                ui.data_mut(|d| d.remove::<Pos2>(navigator_zoom_drag_id()));
+            }
+        } else if (resp.clicked() || resp.dragged())
+            && let Some(pp) = resp.interact_pointer_pos()
+        {
+            let d = (pp - rect.min) / s;
+            app.ui.views[idx].center = [d.x.clamp(0.0, size.width as f32), d.y.clamp(0.0, size.height as f32)];
+            app.ui.views[idx].zoom_animating = false;
+            app.ui.views[idx].zoom_anchor = None;
+            app.ui.views[idx].fit_pending = false;
+        }
+        if command && resp.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::ZoomIn);
+        }
+        // The Navigator has its own zoom target: an unmodified wheel over the preview
+        // should zoom even when the document canvas is configured to scroll on wheel.
+        // Use the canvas wheel classifier to honour one ×1.1 step per notch,
+        // eased over its frames or instant as General › Animated Zoom says.
+        let pinch_zooms = app.session.prefs().enhanced_controls.zoom_with_trackpad_pinch;
+        let animated_zoom = app.session.prefs().general.animated_zoom;
+        let touch_gestures = app.session.prefs().enhanced_controls.touch_gestures;
+        let navigator_wheel = egui::Id::unique("pc-navigator-wheel");
+        if resp.hovered()
+            && let Some(crate::wheel_nav::Wheel::Zoom(factor)) =
+                crate::wheel_nav::read_with(&ctx, true, pinch_zooms, animated_zoom, navigator_wheel, true, true, touch_gestures)
+        {
+            let view = &mut app.ui.views[idx];
+            let next = crate::zoom_levels::clamp(view.zoom * factor, view.doc_size);
+            if next != view.zoom * factor {
+                crate::wheel_nav::settle(&ctx, navigator_wheel);
+            }
+            if next != view.zoom {
+                view.zoom = next;
+                view.zoom_animating = false;
+                view.zoom_anchor = None;
+                view.fit_pending = false;
             }
         }
-        if resp.drag_stopped() || !resp.dragged() {
-            ui.data_mut(|d| d.remove::<Pos2>(navigator_zoom_drag_id()));
-        }
-    } else if (resp.clicked() || resp.dragged())
-        && let Some(pp) = resp.interact_pointer_pos()
-    {
-        let d = (pp - rect.min) / s;
-        app.ui.views[idx].center = [d.x.clamp(0.0, size.width as f32), d.y.clamp(0.0, size.height as f32)];
-        app.ui.views[idx].zoom_animating = false;
-        app.ui.views[idx].zoom_anchor = None;
-        app.ui.views[idx].fit_pending = false;
+        // Visible-area rectangle.
+        let v = app.ui.views[idx].clone();
+        let canvas = app.last_canvas_rect;
+        let (zoom, center) =
+            if v.zoom_animating && app.session.prefs().general.animated_zoom { v.display_camera.unwrap_or((v.zoom, v.center)) } else { (v.zoom, v.center) };
+        let point_zoom = (zoom / app.canvas_ppp()).max(1e-6);
+        // Pixel aspect correction shows fewer document columns across the same canvas width.
+        let vw = canvas.width() / point_zoom / app.ui.view.display_aspect() * s;
+        let vh = canvas.height() / point_zoom * s;
+        let c = pos2(rect.min.x + center[0] * s, rect.min.y + center[1] * s);
+        let vr = Rect::from_center_size(c, vec2(vw, vh)).intersect(frame.shrink(1.0));
+        ui.painter().rect_stroke(vr, 2.0, Stroke::new(1.5, Color32::from_rgb(255, 84, 84)), StrokeKind::Middle);
     }
-    if command && resp.hovered() {
-        ctx.set_cursor_icon(egui::CursorIcon::ZoomIn);
-    }
-    // The Navigator has its own zoom target: an unmodified wheel over the preview
-    // should zoom even when the document canvas is configured to scroll on wheel.
-    // Use the canvas wheel classifier to honour one ×1.1 step per notch,
-    // eased over its frames or instant as General › Animated Zoom says.
-    let pinch_zooms = app.session.prefs().enhanced_controls.zoom_with_trackpad_pinch;
-    let animated_zoom = app.session.prefs().general.animated_zoom;
-    let touch_gestures = app.session.prefs().enhanced_controls.touch_gestures;
-    let navigator_wheel = egui::Id::unique("pc-navigator-wheel");
-    if resp.hovered()
-        && let Some(crate::wheel_nav::Wheel::Zoom(factor)) =
-            crate::wheel_nav::read_with(&ctx, true, pinch_zooms, animated_zoom, navigator_wheel, true, true, touch_gestures)
-    {
-        let view = &mut app.ui.views[idx];
-        let next = crate::zoom_levels::clamp(view.zoom * factor, view.doc_size);
-        if next != view.zoom * factor {
-            crate::wheel_nav::settle(&ctx, navigator_wheel);
-        }
-        if next != view.zoom {
-            view.zoom = next;
-            view.zoom_animating = false;
-            view.zoom_anchor = None;
-            view.fit_pending = false;
-        }
-    }
-    // Visible-area rectangle.
     let v = app.ui.views[idx].clone();
-    let canvas = app.last_canvas_rect;
-    let (zoom, center) =
-        if v.zoom_animating && app.session.prefs().general.animated_zoom { v.display_camera.unwrap_or((v.zoom, v.center)) } else { (v.zoom, v.center) };
-    let point_zoom = (zoom / app.canvas_ppp()).max(1e-6);
-    // Pixel aspect correction shows fewer document columns across the same canvas width.
-    let vw = canvas.width() / point_zoom / app.ui.view.display_aspect() * s;
-    let vh = canvas.height() / point_zoom * s;
-    let c = pos2(rect.min.x + center[0] * s, rect.min.y + center[1] * s);
-    let vr = Rect::from_center_size(c, vec2(vw, vh)).intersect(frame.shrink(1.0));
-    ui.painter().rect_stroke(vr, 2.0, Stroke::new(1.5, Color32::from_rgb(255, 84, 84)), StrokeKind::Middle);
     // Photoshop's one row under the preview (#4840): the zoom, typed in percent, then Zoom Out,
     // the slider and Zoom In.
     let controls = ui.vertical(|ui| {

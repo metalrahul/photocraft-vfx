@@ -1526,6 +1526,8 @@ mod color_replacement_modes_tests;
 
 #[cfg(test)]
 mod mixer_live_tests;
+pub(crate) mod projected;
+pub use projected::{PreviewOverlay, ProjectedPreview, paint_projected_stroke};
 
 #[cfg(test)]
 #[path = "color_replacement_history_name_tests.rs"]

@@ -611,6 +611,7 @@ mod tests {
             zoom_anchor: None,
             display_camera: None,
             zoom_transition: None,
+            projection: None,
         }];
         a.ui.perspective_crop = Some([[40.0, 10.0], [100.0, 10.0], [100.0, 40.0], [40.0, 40.0]]);
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(600.0, 400.0)).build_ui_state(
@@ -669,6 +670,7 @@ mod tests {
             zoom_anchor: None,
             display_camera: None,
             zoom_transition: None,
+            projection: None,
         }];
         a.ui.perspective_crop = Some([[40.0, 10.0], [100.0, 10.0], [100.0, 40.0], [40.0, 40.0]]);
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(600.0, 400.0)).build_ui_state(
@@ -736,6 +738,7 @@ mod tests {
             zoom_anchor: None,
             display_camera: None,
             zoom_transition: None,
+            projection: None,
         }];
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(700.0, 400.0)).build_ui_state(
             |ui, app: &mut PhotocraftApp| {

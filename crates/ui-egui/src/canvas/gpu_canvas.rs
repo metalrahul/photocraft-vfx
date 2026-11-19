@@ -101,8 +101,17 @@ const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Kept for callers; no longer consulted. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas
 /// off, `=1` ignores the budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
-const VIEW_UNIFORM_SIZE: u64 = 144;
-const VIEW_FLOATS: usize = 36;
+/// View › Float Display for Large Documents. Since the VFX merge the float canvas has no pixel
+/// cap (only the canvas memory budget), so big 32-bit HDR panoramas already get `Rgba16Float`;
+/// the setting is kept so saved preferences and the menu still work.
+static FLOAT_LARGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set [`FLOAT_LARGE`]; returns whether it changed.
+pub fn set_float_large(on: bool) -> bool {
+    FLOAT_LARGE.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+const VIEW_UNIFORM_SIZE: u64 = 176;
+const VIEW_FLOATS: usize = 44;
 const TILE_UNIFORM_SIZE: u64 = 32;
 
 /// Whether this view can use the GPU canvas. Flip and non-square pixel aspect correction are
@@ -147,6 +156,29 @@ pub struct ViewParams {
     /// document, a whole number of widths and heights for a View › Pattern Preview copy (#1067).
     /// A copy samples the same texture, so nothing is composited again.
     pub offset: [f32; 2],
+    /// View › Equirectangular Live Projection: the document is a latlong panorama seen through a
+    /// perspective camera, `[yaw, pitch, vertical fov]` in degrees (live_projection.rs). `zoom`,
+    /// `center` and `rotation` are then unused.
+    pub projection: Option<[f32; 3]>,
+}
+
+/// Mip level the live projection pass (`fs_proj`, `proj_lod`) samples for a device pixel at
+/// view-plane offset (`dx`, `dy`) (`k` = view-plane units per device pixel) and latitude `lat`
+/// (radians) of a `size` equirect document. A pixel's angular size is `k / (1 + r²)` radially
+/// and `k / √(1 + r²)` across, so off-centre pixels cover *less* of the sphere; the larger
+/// (across) one is used. Horizontal stretch toward the poles only counts within ~2° of them, and
+/// the level is biased half a step sharp. 0 = full resolution.
+pub fn projection_lod(k: f32, dx: f32, dy: f32, lat: f32, size: [f32; 2]) -> f32 {
+    use std::f32::consts::PI;
+    let r2 = dx * dx + dy * dy;
+    let ang = k / (1.0 + r2).sqrt();
+    let along_lon = ang * size[1] / PI;
+    let c = lat.cos().max(0.0005);
+    let along_lat = ang * size[0] / (2.0 * PI) / c;
+    let t = ((0.035 - c) / 0.035).clamp(0.0, 1.0);
+    let near_pole = t * t * (3.0 - 2.0 * t);
+    let fp = along_lon.max(along_lon + (along_lat * 0.25 - along_lon) * near_pole);
+    (fp.max(1e-6).log2() - 0.5).max(0.0)
 }
 
 /// When high-bit documents get an `Rgba16Float` canvas texture.

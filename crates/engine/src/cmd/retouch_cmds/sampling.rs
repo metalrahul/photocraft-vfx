@@ -12,7 +12,7 @@ pub(crate) enum SampleLayers {
     All,
 }
 
-pub(super) fn sample_layers(p: &Value, cmd: &str) -> Result<SampleLayers> {
+pub(crate) fn sample_layers(p: &Value, cmd: &str) -> Result<SampleLayers> {
     match string(p, "sampleLayer", "current") {
         "current" => Ok(SampleLayers::Current),
         "currentAndBelow" => Ok(SampleLayers::CurrentAndBelow),

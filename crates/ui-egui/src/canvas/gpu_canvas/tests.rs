@@ -355,9 +355,28 @@ fn canvas_texture_bytes_price_every_tile_and_mip_level() {
 }
 
 #[test]
+fn projection_lod_is_sharp_off_centre_and_only_blurs_at_the_poles() {
+    let size = [20000.0, 10000.0];
+    // 90° vertical FOV over 1000 device px: ~6.4 texels per px at the centre.
+    let k = 1.0 / 500.0;
+    let centre = projection_lod(k, 0.0, 0.0, 0.0, size);
+    assert!(centre > 2.0 && centre < 3.0, "{centre}");
+    // Off centre (a 16:9 corner) is never blurrier than the centre.
+    let corner = projection_lod(k, 1.78, 1.0, 0.5, size);
+    assert!(corner <= centre, "{corner} vs {centre}");
+    // Narrow FOV (≤ 1 texel per px): full resolution everywhere, also at 60° latitude.
+    let k = (2.5f32.to_radians()).tan() / 500.0;
+    for (dx, dy, lat) in [(0.0, 0.0, 0.0), (0.04, 0.04, 1.0), (0.0, 0.0, 1.2)] {
+        assert_eq!(projection_lod(k, dx, dy, lat, size), 0.0, "({dx},{dy},{lat})");
+    }
+    // Only right at a pole does the horizontal stretch raise the level.
+    assert!(projection_lod(k, 0.0, 0.0, 89.99f32.to_radians(), size) > 0.0);
+}
+
+#[test]
 fn view_uniform_packs_rotation() {
-    assert_eq!(VIEW_FLOATS, 36);
-    assert_eq!(VIEW_UNIFORM_SIZE, 144);
+    assert_eq!(VIEW_FLOATS, 44);
+    assert_eq!(VIEW_UNIFORM_SIZE, 176);
     assert_eq!(VIEW_FLOATS * 4, VIEW_UNIFORM_SIZE as usize);
     assert!(gpu_view_ok(false, 0.0, 1.0));
     assert!(gpu_view_ok(false, 45.0_f32.to_radians(), 1.0));

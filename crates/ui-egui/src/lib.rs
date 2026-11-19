@@ -203,6 +203,14 @@ use input::opacity_keys;
 use input::page_keys;
 use input::scrub_wrap;
 pub use input::shortcut_dispatch;
+pub mod live_projection;
+pub mod live_projection_misc;
+pub mod live_projection_path;
+pub mod live_projection_select;
+#[cfg(test)]
+mod live_projection_tests;
+pub mod live_projection_text;
+pub mod live_projection_xform;
 pub use input::shortcuts;
 use input::single_line_drag;
 pub use input::spring_tools;
@@ -387,6 +395,15 @@ pub struct PhotocraftApp {
     /// The tool pointer events go to this frame when it isn't the selected one: the Move tool
     /// while ⌘ is held (`hold_keys::cmd_moves`). Set by the canvas for its gestures, never saved.
     pub(crate) tool_override: Option<state::Tool>,
+    /// The Equirectangular Live Projection stroke being drawn and its preview (live_projection.rs).
+    pub(crate) projection_live: Option<live_projection::Live>,
+    /// A selection shape being drawn in a projection view, and the projected marching ants.
+    pub(crate) projection_select: Option<live_projection_select::SelDrag>,
+    pub(crate) projection_ants: Option<live_projection_select::Ants>,
+    /// A Move drag or Free Transform in the projection view.
+    pub(crate) projection_xform: Option<live_projection_xform::Xform>,
+    /// The projection view last drawn: (document, width, height) in device px.
+    pub(crate) projection_view_px: Option<(usize, f64, f64)>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
     /// Large Brush Mode stroke being drawn: its dabs show as a GPU overlay and nothing is

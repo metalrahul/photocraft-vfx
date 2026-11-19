@@ -111,7 +111,7 @@ pub(super) fn healing_brush(s: &mut Session, p: &Value) -> Result<Value> {
 /// Background or not, or past its path with a shape's solid colour, else white, and refuses it
 /// from any other state: observed in Photoshop 27.11.0, where a state with a second layer, even an
 /// empty one, gives an error.
-pub(super) fn history_source(s: &Session, id: Option<LayerId>, p: &Value, cmd: &str) -> Result<Surface> {
+pub(crate) fn history_source(s: &Session, id: Option<LayerId>, p: &Value, cmd: &str) -> Result<Surface> {
     let st = s.active().ok_or(EngineError::NoDocument)?;
     let source_doc = crate::history_source_cmds::paint_source(st, p, cmd)?;
     // Here, so the live preview refuses too. Only the History Brush: the Art History Brush and

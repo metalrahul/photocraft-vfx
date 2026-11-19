@@ -225,6 +225,17 @@ mod pen_rubber_band_tests;
 #[cfg(test)]
 mod paint_tests;
 
+/// `shape.create` params for a drag from `start` to `end` with the options bar's fill and
+/// stroke (Live Projection draws it in view px); `None` for the Custom Shape or a click.
+pub(crate) fn shape_params(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<Value> {
+    if tool == Tool::CustomShape {
+        return None;
+    }
+    let mut g = shapes::shape_geometry(&app.ui.tool_options, tool, start, end, mods)?;
+    g["fill"] = shapes::fill_param(app);
+    g["stroke"] = shapes::stroke_param(app);
+    Some(g)
+}
 #[cfg(test)]
 mod triangle_box_geometry_tests;
 #[cfg(test)]

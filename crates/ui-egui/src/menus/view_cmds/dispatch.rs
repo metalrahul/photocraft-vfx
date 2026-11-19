@@ -50,6 +50,9 @@ pub fn handles(id: &str) -> bool {
             | "view.pixelAspectRatioCorrection"
             | "view.patternPreview"
             | "view.pixelArtPreview"
+            | "view.equirectLiveProjection"
+            | "view.projectionBrushDocumentPixels"
+            | "view.floatDisplayLargeDocuments"
             | "view.rotateView"
             | "view.resetView"
             | "window.panel.layers"
@@ -163,6 +166,15 @@ pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
     }
     if let Some(c) = type_checked(app, id) {
         return Some(c);
+    }
+    if id == "view.floatDisplayLargeDocuments" {
+        return Some(app.ui.tool_options.float_display_large);
+    }
+    if id == "view.projectionBrushDocumentPixels" {
+        return Some(app.ui.tool_options.projection_brush_doc_px);
+    }
+    if id == crate::live_projection::COMMAND {
+        return Some(app.session.active_index().is_some_and(|i| crate::live_projection::active(app, i)));
     }
     Some(match id {
         "view.extras" => o.extras,
@@ -318,6 +330,23 @@ fn run(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, p: &Value) -> Res
     }
     if id == "view.resetView" {
         return crate::rotate_view::reset(app);
+    }
+    if id == "view.floatDisplayLargeDocuments" {
+        let cur = app.ui.tool_options.float_display_large;
+        app.ui.tool_options.float_display_large = flag_param(p, cur);
+        super::sync_float_display(app);
+        return Ok(json!(app.ui.tool_options.float_display_large));
+    }
+    if id == "view.projectionBrushDocumentPixels" {
+        let cur = app.ui.tool_options.projection_brush_doc_px;
+        app.ui.tool_options.projection_brush_doc_px = flag_param(p, cur);
+        return Ok(json!(app.ui.tool_options.projection_brush_doc_px));
+    }
+    if id == crate::live_projection::COMMAND {
+        let i = app.session.active_index().ok_or("no document")?;
+        let cur = crate::live_projection::active(app, i);
+        let on = crate::live_projection::toggle(app, i, Some(flag_param(p, cur)))?;
+        return Ok(json!(on));
     }
     let o = &mut app.ui.view;
     if let Some(k) = id.strip_prefix("view.show.") {

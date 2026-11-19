@@ -72,9 +72,10 @@ pub(crate) use cursors::{
 };
 use cursors::{brush_tip_centre, eyedropper_ring, preview_locator_cursor, visible_crosshair};
 pub(crate) use display::GPU_OUTPUT;
+use display::checker;
 use display::texture_key;
 pub(crate) use display::{cache_key, canvas_display, display_doc, display_image};
-use display::{checker, hdr_preview, sync_display_lut};
+pub(crate) use display::{hdr_preview, sync_display_lut};
 pub use drag::{Drag, DragDocument, fixed_size_px, marquee_corners, marquee_px, marquee_readout, readout_in, size_readout, square_px};
 pub(crate) use drag::{angle_readout, doc_box_corners, draw_readout, draw_value_readout};
 #[cfg(test)]
@@ -123,12 +124,12 @@ use tabs::{dots, paint_dots};
 use tabs::{main_canvas_document, move_target_after_filter};
 #[cfg(test)]
 pub(crate) use textures::detail_plan;
-pub(crate) use textures::visible_doc_rect;
+pub(crate) use textures::{ensure_gpu, visible_doc_rect};
 pub(crate) use textures::{DetailPlan, damage_since, effect_reach, ensure_texture_in_view, retain_gpu_documents, shown_as_document};
 pub use textures::{MAX_TEXTURE, ensure_texture};
 #[cfg(test)]
 use textures::{clamp_texture_side, preview_bounds, texture_factor};
-use textures::{ensure_gpu, redraw_focus};
+use textures::redraw_focus;
 pub use tool_input::{ToolEvent, selection_drag_kind, tool_event};
 pub(crate) use tool_input::{command_guide_at, command_moves_layer, event_tool};
 pub(crate) use transform_controls::ControlsPress;
@@ -443,6 +444,7 @@ fn paint_canvas(
             hdr: hdr_preview(app, doc),
             channel: app.session.color.viewer_channel(doc.id).code(),
             offset: [0.0, 0.0],
+            projection: None,
         };
         paint_gpu_view(painter, rect, params, &pattern);
     } else if gpu_ok && viewport_pages::show(app, ctx, idx, &xf, view.zoom) {
@@ -467,6 +469,7 @@ fn paint_canvas(
             hdr: hdr_preview(app, doc),
             channel: app.session.color.viewer_channel(doc.id).code(),
             offset: [0.0, 0.0],
+            projection: None,
         };
         paint_gpu_view(painter, rect, params, &pattern);
     } else if gpu_ok && ensure_gpu(app, ctx, idx, redraw_focus(&target_xf, &xf)) {
@@ -490,6 +493,7 @@ fn paint_canvas(
             hdr: hdr_preview(app, doc),
             channel: app.session.color.viewer_channel(doc.id).code(),
             offset: [0.0, 0.0],
+            projection: None,
         };
         if app.navigator_plain.contains(&doc.id) {
             app.navigator_gpu.insert(doc.id, params);
@@ -2368,6 +2372,8 @@ fn update_polygon_camera(app: &mut PhotocraftApp, ctx: &egui::Context, (idx, pri
 }
 
 pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect, mut view: View, primary: bool) -> View {
+    // The option is saved with the tool options; the GPU canvas reads a process-wide flag.
+    crate::view_cmds::sync_float_display(app);
     let ctx = ui.ctx().clone();
     // The Frame tool starts transforms from pointer events, which carry no context; the options
     // bar that also records it can be hidden.
@@ -2428,6 +2434,21 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     }
     let doc = app.session.documents()[idx].doc.clone();
     let size = [doc.size.width, doc.size.height];
+    // View › Equirectangular Live Projection draws and handles input on its own.
+    if view.projection.is_some() {
+        view.doc_size = size;
+        let view = crate::live_projection::canvas(app, ui, idx, rect, view, ppp, output);
+        // The canvas popups the flat canvas draws at its end (its tool context menu, the layer
+        // picker) are drawn here too, or a right-click opens one that never shows.
+        crate::layer_pick_ui::show(app, &ui.ctx().clone());
+        crate::canvas_tool_menu::show(app, &ui.ctx().clone());
+        // The primary canvas owns `app.ui.views[idx]` (the write-back at the end of this function
+        // is skipped here), so the camera must be stored now or the next frame starts over.
+        if primary && let Some(v) = app.ui.views.get_mut(idx) {
+            *v = view.clone();
+        }
+        return view;
+    }
     let aspect = sync_view_to_document(app, &ctx, &mut view, &doc, rect, ppp);
     update_polygon_camera(app, &ctx, (idx, primary), rect, &mut view, ppp, aspect);
 

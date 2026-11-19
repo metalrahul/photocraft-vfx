@@ -1053,6 +1053,69 @@ fn build() -> Vec<CommandSpec> {
             crate::brush_cmds::paint_stroke
         ),
         cmd!(
+            "paint.projectedStroke",
+            "Projected Brush Stroke",
+            [],
+            None,
+            r##"{…paint.stroke params, with "points" and "size" in view pixels…,"projection":{"yaw":deg,"pitch":deg,"fov":deg (vertical),"width":px,"height":px}} — View › Equirectangular Live Projection: a stroke drawn in the perspective view, reprojected onto the equirect pixels"##,
+            has_paintable,
+            crate::brush_cmds::paint_projected_stroke
+        ),
+        cmd!(
+            "paint.projectedTool",
+            "Projected Tool Stroke",
+            [],
+            None,
+            r##"{"command":"paint.healingBrush|paint.spotHealing|paint.patch|paint.smudge|paint.blur|paint.sharpen|paint.dodge|paint.burn|paint.sponge|paint.pencil|paint.mixerBrush|paint.colorReplacement|paint.historyBrush","params":{…that command's params, without points…},"points":[[x,y,pressure],…] (view px),"rotation":[9 numbers]? (Healing/Patch: destination→source on the sphere),"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: a retouch or paint tool stroke drawn in the perspective view, reprojected onto the equirect pixels"##,
+            has_paintable,
+            crate::projected_tool::projected_tool
+        ),
+        cmd!(
+            "path.projectedSet",
+            "Projected Path",
+            [],
+            None,
+            r##"{…path.set params, with "path" in view px…,"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: a path drawn in the perspective view (Pen, Freeform, Curvature Pen) stored on the document in equirect pixels"##,
+            has_doc,
+            crate::projected_path::projected_set
+        ),
+        cmd!(
+            "layer.projectedRender",
+            "Type / Shape (Live Projection)",
+            [],
+            None,
+            r##"{"command":"type.create|shape.create","params":{…that command's params in view px…},"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: text or a shape made in the perspective view, rendered upright there and placed on the equirect as a new pixel layer"##,
+            has_doc,
+            crate::projected_transform::projected_render
+        ),
+        cmd!(
+            "layer.projectedRotate",
+            "Move (Live Projection)",
+            [],
+            None,
+            r##"{"rotation":[9 numbers] (row-major, from where the drag started to where it ended)} — View › Equirectangular Live Projection: the Move tool turns the active layer (or the selected part, with the selection) across the sphere"##,
+            has_paintable,
+            crate::projected_transform::projected_rotate
+        ),
+        cmd!(
+            "layer.projectedPlace",
+            "Free Transform / Paste (Live Projection)",
+            [],
+            None,
+            r##"{"source":"layer|clipboard","rect":[x0,y0,x1,y1] (layer: the view-px source),"quad":[[x,y]×4] (tl,tr,br,bl view px),"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: Free Transform of the active layer's content, or Paste as a new layer, mapped through the view onto the equirect pixels"##,
+            has_doc,
+            crate::projected_transform::projected_place
+        ),
+        cmd!(
+            "select.projected",
+            "Projected Selection",
+            [],
+            None,
+            r##"{"kind":"rect|ellipse|lasso|wand|quick|object","rect":[x0,y0,x1,y1],"points":[[x,y],…],"mode":"replace|add|subtract|intersect","feather":px,"antiAlias":bool,"tolerance":n,"contiguous":bool,"size":px,"sampleAllLayers":bool,"projection":{"yaw":deg,"pitch":deg,"fov":deg,"width":px,"height":px}} — View › Equirectangular Live Projection: a selection drawn in the perspective view, reprojected onto the equirect selection"##,
+            has_doc,
+            crate::projected_select::select_projected
+        ),
+        cmd!(
             "tools.setColors",
             "Set Colors",
             [],

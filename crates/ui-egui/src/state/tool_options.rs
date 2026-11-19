@@ -5,6 +5,11 @@ use super::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolOptions {
+    /// Equirectangular Live Projection: the brush Size is in document (equirect) pixels at the
+    /// view centre rather than view pixels, so a stroke covers the same image area at any field of view.
+    pub projection_brush_doc_px: bool,
+    /// View › Float Display for Large Documents (`gpu_canvas::set_float_large`).
+    pub float_display_large: bool,
     pub tolerance: f32,
     pub contiguous: bool,
     pub anti_alias: bool,
@@ -480,6 +485,8 @@ impl SampleAllLayers {
 impl Default for ToolOptions {
     fn default() -> Self {
         Self {
+            projection_brush_doc_px: false,
+            float_display_large: false,
             tolerance: 32.0,
             contiguous: true,
             anti_alias: true,

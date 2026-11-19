@@ -229,3 +229,11 @@ mod form_reset_tests {
 #[cfg(test)]
 #[path = "view_cmds/tests.rs"]
 mod tests;
+
+/// Apply View › Float Display for Large Documents to the GPU canvas; the canvases re-upload in
+/// the new format when it changes.
+pub(crate) fn sync_float_display(app: &mut crate::PhotocraftApp) {
+    if crate::gpu_canvas::set_float_large(app.ui.tool_options.float_display_large) {
+        app.canvases.clear();
+    }
+}

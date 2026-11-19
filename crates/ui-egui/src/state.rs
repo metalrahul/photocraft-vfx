@@ -202,6 +202,9 @@ pub struct View {
     /// Canvas camera rotation in degrees, wrapped to (−180, 180]. Turns the view, not the pixels.
     #[serde(default)]
     pub rotation: f32,
+    /// View › Equirectangular Live Projection camera, when on (live_projection.rs).
+    #[serde(default)]
+    pub projection: Option<crate::live_projection::ProjectionView>,
     /// Transient presentation state for a discrete zoom command; the target camera above remains
     /// authoritative and this flag is never persisted.
     #[serde(skip)]
@@ -244,6 +247,7 @@ impl Default for View {
             fill_pending: false,
             doc_size: [0, 0],
             rotation: 0.0,
+            projection: None,
             zoom_animating: false,
             zoom_anchor: None,
             display_camera: None,

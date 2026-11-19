@@ -75,6 +75,16 @@ impl CanvasCallback {
         let grid = if p.pixel_grid && crate::pixel_grid::shows_at(p.zoom * ppp) { crate::pixel_grid::STRENGTH } else { 0.0 };
         let square = if style.checker_square > 0.0 { (style.checker_square * ppp).round().max(1.0) } else { 0.0 };
         let (l, d, g) = (style.checker_light, style.checker_dark, style.gamut_color);
+        // Live projection: flag, yaw, pitch (radians), view-plane units per device pixel, and the
+        // view's centre in device pixels.
+        let proj = match p.projection {
+            Some([yaw, pitch, fov]) if yaw.is_finite() && pitch.is_finite() && fov.is_finite() => {
+                let h = (self.rect.height() * ppp).max(1.0);
+                let c = self.rect.center();
+                [1.0, yaw.to_radians(), pitch.to_radians(), (fov.to_radians() / 2.0).tan() / (h / 2.0), c.x * ppp, c.y * ppp]
+            }
+            _ => [0.0; 6],
+        };
         // 32-bit preview: linear-light gain 2^exposure (0 = off) and 1 / gamma.
         let (gain, inv_gamma) = match p.hdr {
             Some([e, gm]) if e.is_finite() && gm.is_finite() && gm > 0.0 => (2f32.powf(e.clamp(-20.0, 20.0)), 1.0 / gm.max(0.01)),
@@ -121,6 +131,14 @@ impl CanvasCallback {
             p.center[1],
             f32::from(p.channel.min(5)),
             0.0,
+            0.0,
+            0.0,
+            proj[0],
+            proj[1],
+            proj[2],
+            proj[3],
+            proj[4],
+            proj[5],
             0.0,
             0.0,
         ]
@@ -182,7 +200,7 @@ impl CallbackTrait for CanvasCallback {
         pass.set_viewport(0.0, 0.0, sw as f32, sh as f32, 0.0, 1.0);
         pass.set_scissor_rect(clip.left_px.max(0) as u32, clip.top_px.max(0) as u32, clip.width_px as u32, clip.height_px as u32);
         pass.set_bind_group(0, &view.bind_group, &[0]);
-        if self.params.shadow {
+        if self.params.shadow && self.params.projection.is_none() {
             pass.set_pipeline(&res.shadow_pipeline);
             pass.draw(0..6, 0..1);
         }
@@ -197,10 +215,19 @@ impl CallbackTrait for CanvasCallback {
         let (cos, sin) = if rot.abs() < 1e-8 { (1.0, 0.0) } else { (rot.cos(), rot.sin()) };
         let cen = self.params.center;
         let [ox, oy] = self.params.offset.map(|v| if v.is_finite() { v } else { 0.0 });
-        pass.set_pipeline(&res.tile_pipeline);
         pass.set_bind_group(2, res.luts.get(&(self.params.doc, self.params.output)).unwrap_or(&res.identity_lut), &[]);
         // Large Brush Mode's stroke overlay (stroke_overlay.rs), or the idle one.
         pass.set_bind_group(3, res.stroke.bind_group(self.params.doc), &[]);
+        if self.params.projection.is_some() {
+            // Every tile covers the whole view and keeps only the directions that land in it.
+            pass.set_pipeline(&res.proj_pipeline);
+            for t in &doc.tiles {
+                pass.set_bind_group(1, &t.bind_group, &[0]);
+                pass.draw(0..6, 0..1);
+            }
+            return;
+        }
+        pass.set_pipeline(&res.tile_pipeline);
         for t in &doc.tiles {
             let [tx, ty, tw, th] = t.rect.map(|v| v as f32);
             let (x0, y0, x1, y1) = tile_screen_aabb(origin, scale, cen, cos, sin, [tx + ox, ty + oy, tw, th]);

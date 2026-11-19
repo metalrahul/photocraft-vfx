@@ -678,6 +678,7 @@ fn space_on_the_canvas_moves_the_frame_not_the_view() {
         fill_pending: false,
         doc_size: [200, 100],
         rotation: 0.0,
+        projection: None,
         zoom_animating: false,
         zoom_anchor: None,
         display_camera: None,
@@ -741,6 +742,7 @@ fn a_handle_held_past_the_canvas_edge_scrolls_the_view() {
         zoom_anchor: None,
         display_camera: None,
         zoom_transition: None,
+        projection: None,
     }];
     a.ui.crop_rect = Some([40.0, 10.0, 100.0, 40.0]);
     a.crop.default_frame = false;
@@ -794,6 +796,7 @@ fn a_press_beside_the_canvas_does_not_scroll_it_for_a_crop_drag() {
         zoom_anchor: None,
         display_camera: None,
         zoom_transition: None,
+        projection: None,
     }];
     a.ui.crop_rect = Some([40.0, 10.0, 100.0, 40.0]);
     a.crop.default_frame = false;
@@ -835,6 +838,7 @@ fn zoomed_view(height: u32) -> crate::state::View {
         zoom_anchor: None,
         display_camera: None,
         zoom_transition: None,
+        projection: None,
     }
 }
 

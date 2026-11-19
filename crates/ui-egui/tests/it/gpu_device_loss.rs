@@ -400,6 +400,7 @@ fn tiled_canvas_keeps_tiles_in_place() {
         TileApp {
             canvas,
             params: ViewParams {
+                projection: None,
                 doc: 1,
                 doc_size: [W, H],
                 zoom: 1.0,

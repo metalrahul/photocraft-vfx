@@ -149,6 +149,7 @@ fn hover_over_the_canvas_moves_the_preview() {
     a.ui.extras.snap = false;
     a.ui.extras.rulers = false;
     a.ui.views = vec![crate::state::View {
+        projection: None,
         zoom: 2.0,
         center: [100.0, 75.0],
         fit_pending: false,

@@ -9,6 +9,8 @@ struct View {
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
     i: vec4<f32>, // viewer channel (0 RGB, 1 R, 2 G, 3 B, 4 A, 5 luminance), unused ×3
+    j: vec4<f32>, // live projection: on (1), yaw, pitch (radians), view-plane units per device px
+    k: vec4<f32>, // live projection: view centre x, y (device px), unused, unused
 };
 struct Tile { r: vec4<f32>, core: vec4<f32> }; // x, y, w, h in doc px; drawn x0, y0, x1, y1
 
@@ -256,6 +258,13 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
             }
         }
     }
+    return shade(col, d, view.c.z, scale, p);
+}
+
+// The 32-bit preview, display LUT, checkerboard, pixel grid and output encoding of a sampled
+// document colour `col` at document point `d`; `p` is the screen pixel (dither noise).
+fn shade(col_in: vec4<f32>, d: vec2<f32>, grid_alpha: f32, scale: f32, p: vec2<f32>) -> vec4<f32> {
+    var col = col_in;
     if (view.f.w > 0.0 && col.a > 0.0 && view.d.z < 3.5) {
         // View › 32-bit Preview Options: exposure and gamma in linear light on the sRGB-encoded
         // texture value, before the display LUT. A float canvas keeps values above 1.0, so they
@@ -310,7 +319,7 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
     }
     var rgb = col.rgb + checker(d) * (1.0 - col.a);
     // The pixel grid is drawn over pixels with content, not over empty checker.
-    let grid = view.c.z * col.a;
+    let grid = grid_alpha * col.a;
     if (grid > 0.0) {
         let e = fract(d) * scale;
         if (e.x < 1.0 || e.y < 1.0) {
@@ -331,6 +340,59 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         rgb = srgb_to_linear(rgb);
     }
     return vec4(rgb, 1.0);
+}
+
+// --- live projection -----------------------------------------------------------------------
+
+@vertex
+fn vs_proj(@builtin(vertex_index) vi: u32) -> VOut {
+    // The whole screen; the scissor keeps it to the canvas.
+    let c = corner(vi) * 2.0 - 1.0;
+    return VOut(vec4(c.x, c.y, 0.0, 1.0));
+}
+
+const PI: f32 = 3.14159265358979;
+
+// Mirror of `projection_lod` (Rust, tested): the mip level of one device pixel's footprint.
+fn proj_lod(k: f32, dx: f32, dy: f32, lat: f32, size_doc: vec2<f32>) -> f32 {
+    let r2 = dx * dx + dy * dy;
+    let ang = k / sqrt(1.0 + r2);
+    let along_lon = ang * size_doc.y / PI;
+    let c = max(cos(lat), 0.0005);
+    let along_lat = ang * size_doc.x / (2.0 * PI) / c;
+    let near_pole = 1.0 - smoothstep(0.0, 0.035, c);
+    let fp = max(along_lon, mix(along_lon, along_lat * 0.25, near_pole));
+    return max(log2(max(fp, 1e-6)) - 0.5, 0.0);
+}
+
+@fragment
+fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
+    // engine::equirect::ViewProjection::view_to_dir, then dir_to_equirect.
+    let k = view.j.w;
+    let dx = (in.pos.x - view.k.x) * k;
+    let dy = -(in.pos.y - view.k.y) * k;
+    let sy = sin(view.j.y);
+    let cy = cos(view.j.y);
+    let sp = sin(view.j.z);
+    let cp = cos(view.j.z);
+    let f = vec3(cp * sy, sp, cp * cy);
+    let r = vec3(cy, 0.0, -sy);
+    let u = vec3(-sp * sy, cp, -sp * cy);
+    let dir = normalize(f + dx * r + dy * u);
+    let lon = atan2(dir.x, dir.z);
+    let lat = asin(clamp(dir.y, -1.0, 1.0));
+    let size_doc = view.b.zw;
+    var d = vec2((lon / (2.0 * PI) + 0.5) * size_doc.x, (0.5 - lat / PI) * size_doc.y);
+    d.x = d.x - floor(d.x / size_doc.x) * size_doc.x;
+    d.y = clamp(d.y, 0.0, size_doc.y - 0.001);
+    let t = d - tile.r.xy;
+    let size = tile.r.zw;
+    if (any(t < vec2(0.0)) || any(t >= size)) {
+        discard;
+    }
+    let lod = proj_lod(k, dx, dy, lat, size_doc);
+    let col = textureSampleLevel(tex, samp, t / size, lod);
+    return shade(col, d, 0.0, 1.0, in.pos.xy);
 }
 "#;
 
