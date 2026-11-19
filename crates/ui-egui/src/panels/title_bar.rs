@@ -164,8 +164,8 @@ pub fn system_title_bar(app: &PhotocraftApp) -> bool {
     !app.custom_titlebar && app.session.prefs().interface.system_title_bar && !cfg!(any(target_os = "macos", target_arch = "wasm32"))
 }
 
-/// OS window title for this unofficial variant, so it is never mistaken for the official app.
-pub const WINDOW_APP_NAME: &str = "PhotoCraft Projection Edition (unofficial)";
+/// The app name in the OS window title.
+pub const WINDOW_APP_NAME: &str = "PhotoCraft";
 
 /// The OS window title: the active document's name suffixed with the app name (a `*` prefix
 /// marks unsaved changes, like the `•` in the app-drawn title), or just the app name with no
