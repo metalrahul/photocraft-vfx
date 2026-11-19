@@ -136,8 +136,8 @@ pub(crate) fn frustum(app: &PhotocraftApp, idx: usize, rect: Rect) -> Vec<Vec<Po
     let Some(cam) = app.ui.views.get(idx).and_then(|v| v.projection) else { return Vec::new() };
     let c = app.last_canvas_rect;
     let ppp = app.canvas_ppp();
-    let vp = ViewProjection::new(cam.camera(), f64::from(c.width() * ppp), f64::from(c.height() * ppp));
     let (w, h) = doc_size(app, idx);
+    let vp = cam.projection(f64::from(c.width() * ppp), f64::from(c.height() * ppp), [w, h]);
     let n = 64;
     let mut border = Vec::with_capacity(4 * n + 1);
     for i in 0..n {

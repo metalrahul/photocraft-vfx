@@ -24,8 +24,8 @@ pub(crate) fn typing_id(idx: usize) -> egui::Id {
     egui::Id::unique(("pc-live-projection-typing", idx))
 }
 
-fn view_json(cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
-    json!({"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": vp.w, "height": vp.h})
+fn view_json(_cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
+    vp.to_json()
 }
 
 fn run(app: &mut PhotocraftApp, p: serde_json::Value) {

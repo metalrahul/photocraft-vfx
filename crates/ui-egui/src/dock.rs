@@ -109,7 +109,7 @@ impl Group {
             Group::Color => &["Swatches", "Color", "Gradients", "Patterns"],
             Group::Properties => &["Properties", "Adjustments"],
             Group::Character => &["Character", "Paragraph"],
-            Group::Navigator => &["Navigator", "Histogram", "Info"],
+            Group::Navigator => &["Navigator", "Histogram", "Info", "Spherical"],
             Group::History => &["History", "Actions", "Layer Comps"],
             Group::Layers => &["Layers", "Channels", "Paths"],
             Group::Brushes => &["Brushes"],

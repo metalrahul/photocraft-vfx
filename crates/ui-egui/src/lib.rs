@@ -211,6 +211,7 @@ pub mod live_projection_select;
 mod live_projection_tests;
 pub mod live_projection_text;
 pub mod live_projection_xform;
+pub mod spherical_panel;
 pub use input::shortcuts;
 use input::single_line_drag;
 pub use input::spring_tools;

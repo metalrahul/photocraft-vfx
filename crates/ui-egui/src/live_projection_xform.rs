@@ -52,8 +52,8 @@ enum Handle {
     Rotate,
 }
 
-fn view_json(cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
-    json!({"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": vp.w, "height": vp.h})
+fn view_json(_cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
+    vp.to_json()
 }
 
 /// The projection and size of view `idx` as last drawn.
@@ -61,7 +61,9 @@ fn current(app: &PhotocraftApp, ctx: &egui::Context, idx: usize) -> Option<(Proj
     let cam = app.ui.views.get(idx)?.projection?;
     let ppp = ctx.pixels_per_point();
     let r = app.last_canvas_rect;
-    Some((cam, ViewProjection::new(cam.camera(), f64::from(r.width() * ppp), f64::from(r.height() * ppp))))
+    let st = app.session.documents().get(idx)?;
+    let doc = [f64::from(st.doc.size.width.max(1)), f64::from(st.doc.size.height.max(1))];
+    Some((cam, cam.projection(f64::from(r.width() * ppp), f64::from(r.height() * ppp), doc)))
 }
 
 /// Edit › Paste and Edit › Free Transform while the active view is in projection.

@@ -202,6 +202,7 @@ pub(super) fn panel_tab(app: &PhotocraftApp, id: &str) -> Option<(&'static str, 
     Some(match id {
         "window.panel.info" => ("navigator", 2),
         "window.panel.histogram" => ("navigator", 1),
+        "window.panel.spherical" => ("navigator", 3),
         "window.panel.navigator" => ("navigator", 0),
         "window.panel.actions" => ("history", 1),
         "window.panel.layerComps" => ("history", 2),

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::{SampleLayers, bad, blend_param, composite_region, damage_json, parse_brush, run_stroke, sample_layers};
 use crate::brush_cmds::projected::{to_view, write_back};
-use crate::equirect::{Camera, ViewProjection, rot_from_slice, view_rect_to_equirect};
+use crate::equirect::{ViewProjection, rot_from_slice, view_rect_to_equirect};
 use crate::{Result, Session};
 
 const CMD: &str = "paint.projectedClone";
@@ -25,7 +25,7 @@ pub(super) fn projected_clone(s: &mut Session, p: &Value) -> Result<Value> {
     if !(w >= 1.0 && h >= 1.0 && w <= 16384.0 && h <= 16384.0) {
         return Err(bad(CMD, "`projection.width` and `height` must be 1..=16384"));
     }
-    let proj = ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h);
+    let proj = ViewProjection::from_json(q, w, h);
     let rotation: Vec<f64> = p.get("rotation").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
     let rotation = rot_from_slice(&rotation).ok_or_else(|| bad(CMD, "`rotation` must be a 3×3 rotation (9 numbers, row-major)"))?;
     let src_proj = proj.rotated(&rotation);
@@ -83,7 +83,7 @@ pub fn projected_clone_preview(s: &Session, p: &Value) -> Result<crate::brush_cm
     if !(w >= 1.0 && h >= 1.0 && w <= 16384.0 && h <= 16384.0) {
         return Err(bad(CMD, "`projection.width` and `height` must be 1..=16384"));
     }
-    let proj = ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h);
+    let proj = ViewProjection::from_json(q, w, h);
     let rotation: Vec<f64> = p.get("rotation").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
     let rotation = rot_from_slice(&rotation).ok_or_else(|| bad(CMD, "`rotation` must be a 3×3 rotation"))?;
     let src_proj = proj.rotated(&rotation);
@@ -134,7 +134,7 @@ fn crop(cov: &[f32], from: Rect, to: Rect) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::equirect::{rot, rotation_between};
+    use crate::equirect::{Camera, rot, rotation_between};
 
     fn rgba(s: &Session, x: i32, y: i32) -> [f32; 4] {
         let d = s.active().unwrap();

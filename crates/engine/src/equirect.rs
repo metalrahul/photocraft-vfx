@@ -6,6 +6,12 @@
 //! column of the image (longitude 0). Longitude grows to the right (+X), so the image's left edge
 //! is −180° and its right edge +180°; the top row is the north pole (+90° latitude).
 //! Image coordinates are in pixels with (0, 0) the top-left corner of the top-left pixel.
+//!
+//! A view is either that perspective camera or a *rotated latlong* (Window › Spherical): the
+//! whole panorama shown flat again, turned by yaw, pitch and roll so a seam or a pole can be
+//! brought to the middle and painted across. Both map view pixels to directions the same way
+//! ([`ViewProjection::view_to_dir`] / [`ViewProjection::dir_to_view`]), so every projected tool
+//! works in either.
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -57,7 +63,37 @@ impl Camera {
     }
 }
 
-/// A camera looking through a `w` × `h` pixel view (the view's centre is the optical axis).
+/// The forward, right and up unit vectors of a view looking along yaw and pitch, turned by
+/// `roll` degrees about the forward axis (positive turns the picture clockwise).
+pub fn rolled_basis(yaw: f64, pitch: f64, roll: f64) -> [[f64; 3]; 3] {
+    let [f, r, u] = Camera { yaw, pitch, fov: 90.0 }.basis();
+    let (s, c) = (if roll.is_finite() { roll } else { 0.0 }).to_radians().sin_cos();
+    let r2 = [r[0] * c - u[0] * s, r[1] * c - u[1] * s, r[2] * c - u[2] * s];
+    let u2 = [u[0] * c + r[0] * s, u[1] * c + r[1] * s, u[2] * c + r[2] * s];
+    [f, r2, u2]
+}
+
+/// The rotation a rotated latlong view shows the sphere through: a view direction `d` (in the
+/// shown panorama's own frame) looks along `rot(&q, d)` in the document. Identity at 0, 0, 0.
+pub fn latlong_rotation(yaw: f64, pitch: f64, roll: f64) -> Rot {
+    let [f, r, u] = rolled_basis(yaw, pitch, roll);
+    // Columns: local x (right) → r, y (up) → u, z (forward) → f.
+    [[r[0], u[0], f[0]], [r[1], u[1], f[1]], [r[2], u[2], f[2]]]
+}
+
+/// How view pixels map to directions.
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    /// The pinhole camera: `basis` = forward, right, up.
+    Perspective,
+    /// A rotated latlong: the panorama drawn `pw` × `ph` view pixels with its top-left at
+    /// (`ox`, `oy`), looking along `rot` (see [`latlong_rotation`]). `src` keeps what it was made
+    /// from (yaw, pitch, roll, scale, centre row, document width and height) for [`ViewProjection::to_json`].
+    Latlong { rot: Rot, ox: f64, oy: f64, pw: f64, ph: f64, src: [f64; 7] },
+}
+
+/// A camera looking through a `w` × `h` pixel view (the view's centre is the optical axis), or
+/// a rotated latlong ([`ViewProjection::latlong`]).
 #[derive(Clone, Copy, Debug)]
 pub struct ViewProjection {
     pub cam: Camera,
@@ -66,6 +102,7 @@ pub struct ViewProjection {
     basis: [[f64; 3]; 3],
     /// tan(fov / 2) / (h / 2): view-plane units per view pixel.
     k: f64,
+    mode: Mode,
 }
 
 impl ViewProjection {
@@ -73,19 +110,122 @@ impl ViewProjection {
         let cam = cam.normalized();
         let (w, h) = (w.max(1.0), h.max(1.0));
         let k = (cam.fov.to_radians() / 2.0).tan() / (h / 2.0);
-        ViewProjection { cam, w, h, basis: cam.basis(), k }
+        ViewProjection { cam, w, h, basis: cam.basis(), k, mode: Mode::Perspective }
+    }
+
+    /// A rotated latlong view `w` × `h` pixels: an `iw` × `ih` panorama turned by `yaw`,
+    /// `pitch` and `roll` (degrees), drawn at `scale` view pixels per document pixel, centred
+    /// horizontally and with document row `center_v` at the view's middle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn latlong(yaw: f64, pitch: f64, roll: f64, w: f64, h: f64, iw: f64, ih: f64, scale: f64, center_v: f64) -> Self {
+        let f = |v: f64, d: f64| if v.is_finite() { v } else { d };
+        let (w, h) = (f(w, 1.0).max(1.0), f(h, 1.0).max(1.0));
+        let (iw, ih) = (f(iw, 2.0).max(1.0), f(ih, 1.0).max(1.0));
+        // Fit the whole panorama when no zoom is given.
+        let fit = (w / iw).min(h / ih);
+        let scale = f(scale, fit);
+        let scale = if scale > 0.0 { scale.clamp(1e-4, 64.0) } else { fit };
+        let center_v = f(center_v, ih / 2.0).clamp(0.0, ih);
+        let (yaw, pitch, roll) = (wrap_deg(f(yaw, 0.0)), f(pitch, 0.0).clamp(-90.0, 90.0), wrap_deg(f(roll, 0.0)));
+        let rot = latlong_rotation(yaw, pitch, roll);
+        let (pw, ph) = (iw * scale, ih * scale);
+        let cam = Camera { yaw, pitch, fov: 90.0 }.normalized();
+        let mode = Mode::Latlong { rot, ox: w / 2.0 - pw / 2.0, oy: h / 2.0 - center_v * scale, pw, ph, src: [yaw, pitch, roll, scale, center_v, iw, ih] };
+        ViewProjection { cam, w, h, basis: rolled_basis(yaw, pitch, roll), k: 1.0, mode }
+    }
+
+    /// The view described by a `"projection"` object of the projected commands: `{"yaw",
+    /// "pitch", "fov"}` for the perspective camera, or `{"kind": "latlong", "yaw", "pitch",
+    /// "roll", "scale", "centerY", "docWidth", "docHeight"}` for a rotated latlong; `w` × `h`
+    /// view pixels.
+    pub fn from_json(q: &serde_json::Value, w: f64, h: f64) -> Self {
+        let g = |k: &str, d: f64| q.get(k).and_then(serde_json::Value::as_f64).unwrap_or(d);
+        if q.get("kind").and_then(serde_json::Value::as_str) == Some("latlong") {
+            let (iw, ih) = (g("docWidth", 2.0), g("docHeight", 1.0));
+            return Self::latlong(g("yaw", 0.0), g("pitch", 0.0), g("roll", 0.0), w, h, iw, ih, g("scale", 0.0), g("centerY", ih / 2.0));
+        }
+        Self::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h)
+    }
+
+    /// The `"projection"` object [`Self::from_json`] reads back as this view.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self.mode {
+            Mode::Latlong { src: [yaw, pitch, roll, scale, cy, iw, ih], .. } => serde_json::json!({
+                "kind": "latlong", "yaw": yaw, "pitch": pitch, "roll": roll, "scale": scale,
+                "centerY": cy, "docWidth": iw, "docHeight": ih, "width": self.w, "height": self.h,
+            }),
+            Mode::Perspective => serde_json::json!({"yaw": self.cam.yaw, "pitch": self.cam.pitch, "fov": self.cam.fov, "width": self.w, "height": self.h}),
+        }
+    }
+
+    /// This view drawn into `w` × `h` pixels instead (the same field of view, or the latlong at
+    /// the same place, scaled).
+    pub fn resized(&self, w: f64, h: f64) -> Self {
+        match self.mode {
+            Mode::Latlong { src: [yaw, pitch, roll, scale, cy, iw, ih], .. } => Self::latlong(yaw, pitch, roll, w, h, iw, ih, scale * w / self.w, cy),
+            Mode::Perspective => Self::new(self.cam, w, h),
+        }
+    }
+
+    /// A key that changes whenever the view's mapping does (for caches of view-space work).
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let src = match self.mode {
+            Mode::Latlong { src, .. } => src,
+            Mode::Perspective => [self.cam.yaw, self.cam.pitch, self.cam.fov, 0.0, 0.0, 0.0, -1.0],
+        };
+        for v in src.iter().chain([self.w, self.h].iter()) {
+            v.to_bits().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Whether this is a rotated latlong view.
+    pub fn is_latlong(&self) -> bool {
+        matches!(self.mode, Mode::Latlong { .. })
+    }
+
+    /// A rotated latlong's rotation (see [`latlong_rotation`]).
+    pub fn latlong_rot(&self) -> Option<Rot> {
+        match self.mode {
+            Mode::Latlong { rot, .. } => Some(rot),
+            Mode::Perspective => None,
+        }
+    }
+
+    /// A rotated latlong's drawn panorama: top-left (x, y) and size in view pixels.
+    pub fn latlong_rect(&self) -> Option<[f64; 4]> {
+        match self.mode {
+            Mode::Latlong { ox, oy, pw, ph, .. } => Some([ox, oy, pw, ph]),
+            Mode::Perspective => None,
+        }
     }
 
     /// The unit world direction through view pixel position (x, y).
     pub fn view_to_dir(&self, x: f64, y: f64) -> [f64; 3] {
+        if let Mode::Latlong { rot: q, ox, oy, pw, ph, .. } = self.mode {
+            return rot(&q, equirect_to_dir(x - ox, y - oy, pw, ph));
+        }
         let [f, r, u] = self.basis;
         let dx = (x - self.w / 2.0) * self.k;
         let dy = -(y - self.h / 2.0) * self.k;
         normalize([f[0] + dx * r[0] + dy * u[0], f[1] + dx * r[1] + dy * u[1], f[2] + dx * r[2] + dy * u[2]])
     }
 
-    /// The view pixel position world direction `d` projects to, `None` behind the camera.
+    /// The view pixel position world direction `d` projects to, `None` behind the camera (a
+    /// rotated latlong shows every direction).
     pub fn dir_to_view(&self, d: [f64; 3]) -> Option<[f64; 2]> {
+        if let Mode::Latlong { rot: q, ox, oy, pw, ph, .. } = self.mode {
+            // The inverse rotation is the transpose.
+            let local = [
+                q[0][0] * d[0] + q[1][0] * d[1] + q[2][0] * d[2],
+                q[0][1] * d[0] + q[1][1] * d[1] + q[2][1] * d[2],
+                q[0][2] * d[0] + q[1][2] * d[1] + q[2][2] * d[2],
+            ];
+            let [u, v] = dir_to_equirect(local, pw, ph);
+            return Some([ox + u, oy + v]);
+        }
         let [f, r, u] = self.basis;
         let z = dot(d, f);
         if z <= 1e-6 {
@@ -112,7 +252,11 @@ impl ViewProjection {
     /// undistorted where the stroke is.
     pub fn rotated(&self, q: &Rot) -> ViewProjection {
         let [f, r, u] = self.basis;
-        ViewProjection { basis: [rot(q, f), rot(q, r), rot(q, u)], ..*self }
+        let mode = match self.mode {
+            Mode::Latlong { rot: m, ox, oy, pw, ph, src } => Mode::Latlong { rot: mul(q, &m), ox, oy, pw, ph, src },
+            Mode::Perspective => Mode::Perspective,
+        };
+        ViewProjection { basis: [rot(q, f), rot(q, r), rot(q, u)], mode, ..*self }
     }
 }
 
@@ -169,6 +313,17 @@ pub fn rot_from_slice(v: &[f64]) -> Option<Rot> {
         }
     }
     Some(q)
+}
+
+/// `a · b`.
+pub fn mul(a: &Rot, b: &Rot) -> Rot {
+    let mut o = [[0.0; 3]; 3];
+    for (i, row) in o.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+        }
+    }
+    o
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -353,6 +508,78 @@ mod tests {
             assert!((0..3).all(|i| close(m[i], b[i], 1e-9)), "{a:?}→{b:?}: {m:?}");
             assert!(rot_from_slice(&q.concat()).is_some(), "orthonormal");
         }
+    }
+
+    #[test]
+    fn latlong_at_zero_is_the_document() {
+        // No rotation, one view pixel per document pixel, the view the document's size: every
+        // view pixel is the same document pixel.
+        let (iw, ih) = (4096.0, 2048.0);
+        let p = ViewProjection::latlong(0.0, 0.0, 0.0, iw, ih, iw, ih, 1.0, ih / 2.0);
+        for &(x, y) in &[(0.5, 0.5), (2048.0, 1024.0), (100.25, 1900.75), (4095.5, 7.0)] {
+            let [u, v] = p.view_to_equirect(x, y, iw, ih);
+            assert!(close(u, x, 1e-6) && close(v, y, 1e-6), "({x},{y}) -> ({u},{v})");
+        }
+    }
+
+    #[test]
+    fn latlong_centre_looks_where_the_perspective_camera_looks() {
+        for (yaw, pitch, roll) in [(0.0, 0.0, 0.0), (90.0, 30.0, 0.0), (-150.0, -45.0, 20.0), (179.0, 80.0, -90.0)] {
+            let p = ViewProjection::latlong(yaw, pitch, roll, 1200.0, 700.0, 8192.0, 4096.0, 0.0, f64::NAN);
+            let c = p.view_to_dir(600.0, 350.0);
+            let f = ViewProjection::new(Camera { yaw, pitch, fov: 60.0 }, 100.0, 100.0).view_to_dir(50.0, 50.0);
+            assert!((0..3).all(|i| close(c[i], f[i], 1e-9)), "{yaw} {pitch} {roll}: {c:?} vs {f:?}");
+        }
+    }
+
+    #[test]
+    fn latlong_round_trips_and_rotation_is_orthonormal() {
+        let (iw, ih) = (16384.0, 8192.0);
+        for (yaw, pitch, roll) in [(0.0, 0.0, 0.0), (37.0, -12.0, 5.0), (180.0, 90.0, 45.0), (-90.0, -89.0, 170.0)] {
+            assert!(rot_from_slice(&latlong_rotation(yaw, pitch, roll).concat()).is_some());
+            let p = ViewProjection::latlong(yaw, pitch, roll, 1600.0, 900.0, iw, ih, 0.4, 3000.0);
+            for &(x, y) in &[(800.0, 450.0), (10.0, 20.0), (1590.0, 880.0), (333.3, 444.4)] {
+                let [u, v] = p.view_to_equirect(x, y, iw, ih);
+                let [bx, by] = p.equirect_to_view(u, v, iw, ih).expect("latlong shows every direction");
+                assert!(close(bx, x, 1e-4) && close(by, y, 1e-4), "{yaw} {pitch} {roll}: ({x},{y}) -> ({u},{v}) -> ({bx},{by})");
+            }
+        }
+    }
+
+    #[test]
+    fn latlong_yaw_moves_the_seam_to_the_middle() {
+        // Yaw 180: the view's centre column is the document's ±180° seam.
+        let (iw, ih) = (4000.0, 2000.0);
+        let p = ViewProjection::latlong(180.0, 0.0, 0.0, iw, ih, iw, ih, 1.0, ih / 2.0);
+        let [l, _] = p.view_to_equirect(1999.0, 1000.0, iw, ih);
+        let [r, _] = p.view_to_equirect(2001.0, 1000.0, iw, ih);
+        assert!(l > iw - 5.0 && r < 5.0, "{l} {r}");
+        // And a dab there touches both edges of the document.
+        let rects = view_rect_to_equirect(&p, [1990.0, 990.0, 2010.0, 1010.0], 4000, 2000, 1.0);
+        assert_eq!(rects.len(), 2, "{rects:?}");
+    }
+
+    #[test]
+    fn latlong_from_json_and_rotated() {
+        let q = serde_json::json!({"kind": "latlong", "yaw": 30.0, "pitch": 10.0, "roll": 5.0, "scale": 0.5, "centerY": 900.0, "docWidth": 4000.0, "docHeight": 2000.0});
+        let p = ViewProjection::from_json(&q, 1000.0, 800.0);
+        let d = ViewProjection::latlong(30.0, 10.0, 5.0, 1000.0, 800.0, 4000.0, 2000.0, 0.5, 900.0);
+        assert!(p.is_latlong() && p.latlong_rect() == d.latlong_rect());
+        let a = p.view_to_dir(123.0, 456.0);
+        let b = d.view_to_dir(123.0, 456.0);
+        assert!((0..3).all(|i| close(a[i], b[i], 1e-12)));
+        // Turning the view by q turns every direction by q.
+        let q = rotation_between([0.0, 0.0, 1.0], [0.3, 0.2, 0.9]);
+        let t = p.rotated(&q);
+        let (x, y) = (321.0, 210.0);
+        let want = rot(&q, p.view_to_dir(x, y));
+        let got = t.view_to_dir(x, y);
+        assert!((0..3).all(|i| close(want[i], got[i], 1e-9)), "{want:?} {got:?}");
+        // It writes itself back out.
+        let back = ViewProjection::from_json(&p.to_json(), p.w, p.h);
+        assert!(back.latlong_rect() == p.latlong_rect() && back.latlong_rot() == p.latlong_rot());
+        // The perspective form still parses.
+        assert!(!ViewProjection::from_json(&serde_json::json!({"yaw": 1.0}), 10.0, 10.0).is_latlong());
     }
 
     #[test]

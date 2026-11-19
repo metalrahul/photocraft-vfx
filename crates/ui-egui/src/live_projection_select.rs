@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::PhotocraftApp;
 use crate::state::Tool;
-use photocraft_engine::equirect::Camera;
+use photocraft_engine::equirect::ViewProjection;
 
 /// The selection tools that work in the projection view.
 pub fn supported(t: Tool) -> bool {
@@ -35,8 +35,8 @@ pub struct SelDrag {
     points: Vec<[f64; 2]>,
     /// Where the press was (marquees: ⌥ draws from it as the centre).
     anchor: [f64; 2],
-    /// The camera the shape is drawn in: looking around (the wheel) drops it.
-    cam: [u32; 5],
+    /// The view the shape is drawn in ([`ViewProjection::key`]): looking around (the wheel) drops it.
+    cam: u64,
     /// The image resampled into the view: live Quick Selection and Magnetic Lasso tracing.
     pixels: Option<photocraft_engine::projected_select::ViewPixels>,
     /// Magnetic Lasso: the live segment to the pointer, the pointer's trail since the last
@@ -59,7 +59,7 @@ impl SelDrag {
     pub(crate) fn has_quick_preview(&self) -> bool {
         self.quick.is_some()
     }
-    fn new(doc: usize, tool: Tool, mode: &'static str, q: [f64; 2], cam: [u32; 5]) -> Self {
+    fn new(doc: usize, tool: Tool, mode: &'static str, q: [f64; 2], cam: u64) -> Self {
         SelDrag {
             doc,
             tool,
@@ -80,7 +80,7 @@ impl SelDrag {
 
 /// Cached marching ants for one view.
 pub struct Ants {
-    key: (usize, [u32; 3], [u32; 2]),
+    key: (usize, u64, [u32; 2]),
     /// Edge pixels (half-resolution view), and the box they span.
     edges: Vec<(u32, u32)>,
     bbox: [u32; 4],
@@ -105,12 +105,12 @@ fn mode_for(app: &PhotocraftApp, tool: Tool, m: egui::Modifiers) -> &'static str
     }
 }
 
-fn proj_json(cam: Camera, w: f64, h: f64) -> Value {
-    json!({"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": w, "height": h})
+fn proj_json(cam: ViewProjection, w: f64, h: f64) -> Value {
+    cam.resized(w, h).to_json()
 }
 
 /// `select.projected` params for `tool` with `points` (view device px).
-pub(crate) fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], cam: Camera, w: f64, h: f64) -> Option<Value> {
+pub(crate) fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], cam: ViewProjection, w: f64, h: f64) -> Option<Value> {
     let o = &app.ui.tool_options;
     let mut p = json!({"mode": mode, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all.get(tool), "projection": proj_json(cam, w, h)});
     let (a, b) = (points.first().copied()?, points.last().copied()?);
@@ -150,7 +150,7 @@ pub(crate) fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64
     Some(p)
 }
 
-fn commit(app: &mut PhotocraftApp, d: SelDrag, cam: Camera, w: f64, h: f64) {
+fn commit(app: &mut PhotocraftApp, d: SelDrag, cam: ViewProjection, w: f64, h: f64) {
     let small = |pts: &[[f64; 2]]| {
         let (a, b) = (pts[0], pts[pts.len() - 1]);
         (a[0] - b[0]).abs() < 2.0 || (a[1] - b[1]).abs() < 2.0
@@ -197,14 +197,14 @@ pub fn tool(
     painter: &egui::Painter,
     rect: Rect,
     ppp: f32,
-    cam: Camera,
+    cam: ViewProjection,
     idx: usize,
     tool: Tool,
 ) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let to_screen = |q: [f64; 2]| -> Pos2 { rect.min + vec2(q[0] as f32, q[1] as f32) / ppp };
     let (w, h) = (f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
-    let ckey = [cam.yaw as f32, cam.pitch as f32, cam.fov as f32, w as f32, h as f32].map(f32::to_bits);
+    let ckey = cam.resized(w, h).key();
     let mods = ctx.input(|i| i.modifiers);
     // Another tool or document, or the view turned: drop a half-drawn shape.
     if app.projection_select.as_ref().is_some_and(|d| d.doc != idx || d.tool != tool || d.cam != ckey) {
@@ -431,7 +431,7 @@ pub fn tool(
 }
 
 /// Close the Magnetic Lasso border along the edges (⌥: straight) and commit it.
-fn close_magnetic(app: &mut PhotocraftApp, straight: bool, st: photocraft_algo::magnetic::Settings, cam: Camera, w: f64, h: f64) {
+fn close_magnetic(app: &mut PhotocraftApp, straight: bool, st: photocraft_algo::magnetic::Settings, cam: ViewProjection, w: f64, h: f64) {
     let Some(mut d) = app.projection_select.take() else { return };
     let live = std::mem::take(&mut d.live);
     d.points.extend(live);
@@ -476,16 +476,17 @@ fn live_quick(app: &mut PhotocraftApp, ctx: &egui::Context) {
 }
 
 /// Draw the marching ants of document `idx`'s selection over the projection view.
-pub fn ants(app: &mut PhotocraftApp, ctx: &egui::Context, painter: &egui::Painter, rect: Rect, ppp: f32, cam: Camera, idx: usize) {
+pub fn ants(app: &mut PhotocraftApp, ctx: &egui::Context, painter: &egui::Painter, rect: Rect, ppp: f32, cam: ViewProjection, idx: usize) {
     let Some(st) = app.session.documents().get(idx) else { return };
     if st.doc.selection.is_none() {
         app.projection_ants = None;
         return;
     }
     let (w, h) = (((rect.width() * ppp) / ANTS_SCALE).ceil().max(1.0) as u32, ((rect.height() * ppp) / ANTS_SCALE).ceil().max(1.0) as u32);
-    let key = (std::sync::Arc::as_ptr(&st.doc) as usize, [cam.yaw as f32, cam.pitch as f32, cam.fov as f32].map(f32::to_bits), [w, h]);
+    let small = cam.resized(f64::from(w), f64::from(h));
+    let key = (std::sync::Arc::as_ptr(&st.doc) as usize, small.key(), [w, h]);
     if app.projection_ants.as_ref().is_none_or(|a| a.key != key) {
-        let Some(m) = photocraft_engine::projected_select::projected_selection_mask(&st.doc, cam, w, h) else {
+        let Some(m) = photocraft_engine::projected_select::projected_selection_mask(&st.doc, &small) else {
             app.projection_ants = None;
             return;
         };

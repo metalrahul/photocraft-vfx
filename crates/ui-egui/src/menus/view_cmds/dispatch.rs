@@ -67,6 +67,7 @@ pub fn handles(id: &str) -> bool {
             | "window.panel.paragraph"
             | "window.panel.info"
             | "window.panel.histogram"
+            | "window.panel.spherical"
             | "window.panel.swatches"
             | "window.panel.adjustments"
             | "type.panels.character"

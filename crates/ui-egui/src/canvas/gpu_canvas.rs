@@ -110,8 +110,8 @@ static FLOAT_LARGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 pub fn set_float_large(on: bool) -> bool {
     FLOAT_LARGE.swap(on, std::sync::atomic::Ordering::Relaxed) != on
 }
-const VIEW_UNIFORM_SIZE: u64 = 176;
-const VIEW_FLOATS: usize = 44;
+const VIEW_UNIFORM_SIZE: u64 = 224;
+const VIEW_FLOATS: usize = 56;
 const TILE_UNIFORM_SIZE: u64 = 32;
 
 /// Whether this view can use the GPU canvas. Flip and non-square pixel aspect correction are
@@ -157,9 +157,20 @@ pub struct ViewParams {
     /// A copy samples the same texture, so nothing is composited again.
     pub offset: [f32; 2],
     /// View › Equirectangular Live Projection: the document is a latlong panorama seen through a
-    /// perspective camera, `[yaw, pitch, vertical fov]` in degrees (live_projection.rs). `zoom`,
-    /// `center` and `rotation` are then unused.
-    pub projection: Option<[f32; 3]>,
+    /// perspective camera, or shown as a rotated latlong (Window › Spherical) (live_projection.rs).
+    /// `zoom`, `center` and `rotation` are then unused.
+    pub projection: Option<ProjectionParams>,
+}
+
+/// How [`ViewParams::projection`] shows the latlong.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProjectionParams {
+    /// The perspective camera: `[yaw, pitch, vertical fov]` in degrees.
+    pub camera: [f32; 3],
+    /// A rotated latlong instead (`engine::equirect::ViewProjection::latlong`): the rotation
+    /// (row-major; a shown direction `d` looks along `rot · d`) and the drawn panorama's
+    /// `[x, y, w, h]` in points from the canvas rect's top-left corner.
+    pub latlong: Option<([[f32; 3]; 3], [f32; 4])>,
 }
 
 /// Mip level the live projection pass (`fs_proj`, `proj_lod`) samples for a device pixel at

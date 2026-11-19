@@ -60,8 +60,8 @@ fn grab_id(idx: usize) -> egui::Id {
     egui::Id::unique(("pc-live-projection-path-grab", idx))
 }
 
-fn view_json(cam: &ProjectionView, vp: &ViewProjection) -> Value {
-    json!({"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": vp.w, "height": vp.h})
+fn view_json(_cam: &ProjectionView, vp: &ViewProjection) -> Value {
+    vp.to_json()
 }
 
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -440,9 +440,9 @@ pub fn intercept_run(app: &mut PhotocraftApp, id: &str, params: &Value) -> Optio
         return Some(app.run(id, p));
     }
     // Stroke Path: the brush along the path as seen in the view.
-    let vp = ViewProjection::new(cam.camera(), w, h);
     let st = app.session.active()?;
     let (iw, ih) = (f64::from(st.doc.size.width), f64::from(st.doc.size.height));
+    let vp = cam.projection(w, h, [iw, ih]);
     let path = match params.get("name").and_then(Value::as_str) {
         Some(n) if n != "work" => st.doc.paths.iter().find(|q| q.name == n).map(|q| q.path.clone()),
         _ => st.doc.work_path.clone(),
@@ -453,7 +453,7 @@ pub fn intercept_run(app: &mut PhotocraftApp, id: &str, params: &Value) -> Optio
         if closed && let Some(f) = pts.first().copied() {
             pts.push(f);
         }
-        let q = json!({"erase": false, "zoom": 1.0, "target": crate::canvas::paint_target(app), "points": pts, "projection": {"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": w, "height": h}});
+        let q = json!({"erase": false, "zoom": 1.0, "target": crate::canvas::paint_target(app), "points": pts, "projection": vp.to_json()});
         last = app.run("paint.projectedStroke", q);
         if last.is_err() {
             break;

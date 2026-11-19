@@ -14,10 +14,11 @@ use serde_json::Value;
 use serde_json::json;
 
 use super::{bad, damage_json, erase_locked, parse_points, resolve_brush, stroke_target, with_blend_mode};
-use crate::equirect::{Camera, ViewProjection, view_rect_to_equirect};
+use crate::equirect::{ViewProjection, view_rect_to_equirect};
 use crate::{EngineError, Result, Session};
 
-/// The view the stroke was drawn in, from `"projection": {"yaw", "pitch", "fov", "width", "height"}`.
+/// The view the stroke was drawn in, from `"projection": {"yaw", "pitch", "fov", "width", "height"}`
+/// (or a rotated latlong view: [`ViewProjection::from_json`]).
 fn projection(p: &Value) -> Result<ViewProjection> {
     let q = p.get("projection").ok_or_else(|| bad("paint.projectedStroke", "missing `projection`"))?;
     let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
@@ -25,7 +26,7 @@ fn projection(p: &Value) -> Result<ViewProjection> {
     if !(w >= 1.0 && h >= 1.0 && w <= 16384.0 && h <= 16384.0) {
         return Err(bad("paint.projectedStroke", "`projection.width` and `height` must be 1..=16384"));
     }
-    Ok(ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h))
+    Ok(ViewProjection::from_json(q, w, h))
 }
 
 /// Bilinear sample of `s` at pixel-centre position (x, y) (pixel i's centre is i + 0.5), wrapping
@@ -447,5 +448,5 @@ mod tests {
 #[cfg(test)]
 pub(crate) fn bench_view(q: &Value) -> ViewProjection {
     let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
-    ViewProjection::new(crate::equirect::Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, g("width", 1.0), g("height", 1.0))
+    ViewProjection::from_json(q, g("width", 1.0), g("height", 1.0))
 }

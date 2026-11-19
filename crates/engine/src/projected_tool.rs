@@ -18,7 +18,7 @@ use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::brush_cmds::projected::{PreviewOverlay, overlay, to_view, write_back};
-use crate::equirect::{Camera, ViewProjection, rot_from_slice};
+use crate::equirect::{ViewProjection, rot_from_slice};
 use crate::{EngineError, Result, Session};
 
 const CMD: &str = "paint.projectedTool";
@@ -83,7 +83,7 @@ impl ProjectedTool {
         if !(w >= 1.0 && h >= 1.0 && w <= 16384.0 && h <= 16384.0) {
             return Err(bad("`projection.width` and `height` must be 1..=16384"));
         }
-        let proj = ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h);
+        let proj = ViewProjection::from_json(q, w, h);
         let view = Rect::new(0, 0, w as i32, h as i32);
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let layer = st.active_layer;
@@ -265,11 +265,7 @@ pub fn projected_tool(s: &mut Session, p: &Value) -> Result<Value> {
         let params = p.get("params").cloned().unwrap_or_else(|| json!({}));
         let q = p.get("projection").ok_or_else(|| bad("missing `projection`"))?;
         let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
-        let vp = ViewProjection::new(
-            Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) },
-            g("width", 1.0).max(1.0),
-            g("height", 1.0).max(1.0),
-        );
+        let vp = ViewProjection::from_json(q, g("width", 1.0).max(1.0), g("height", 1.0).max(1.0));
         let (a, b) = (points[0], points[points.len() - 1]);
         let dmg = if cmd == "paint.gradient" {
             crate::projected_fill::gradient(s, &params, &vp, [a[0], a[1]], [b[0], b[1]])?
@@ -309,7 +305,7 @@ pub fn projected_tool(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::equirect::{IDENTITY, rotation_between};
+    use crate::equirect::{Camera, IDENTITY, rotation_between};
 
     fn doc() -> Session {
         let mut s = Session::new();

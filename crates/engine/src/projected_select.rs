@@ -15,7 +15,7 @@ use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::brush_cmds::projected::to_view;
-use crate::equirect::{Camera, ViewProjection, view_rect_to_equirect};
+use crate::equirect::{ViewProjection, view_rect_to_equirect};
 use crate::{EngineError, Result, Session};
 
 const CMD: &str = "select.projected";
@@ -31,7 +31,7 @@ fn projection(p: &Value) -> Result<ViewProjection> {
     if !(w >= 1.0 && h >= 1.0 && w <= 16384.0 && h <= 16384.0) {
         return Err(bad("`projection.width` and `height` must be 1..=16384"));
     }
-    Ok(ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h))
+    Ok(ViewProjection::from_json(q, w, h))
 }
 
 fn f(p: &Value, k: &str, d: f64) -> f64 {
@@ -325,11 +325,11 @@ impl ViewPixels {
 
 /// The active selection resampled into a view (`None` without one): one coverage byte per view
 /// pixel, row-major. The UI draws the marching ants from its edges.
-pub fn projected_selection_mask(doc: &photocraft_doc::Document, cam: Camera, w: u32, h: u32) -> Option<Vec<u8>> {
+pub fn projected_selection_mask(doc: &photocraft_doc::Document, proj: &ViewProjection) -> Option<Vec<u8>> {
     let m = doc.selection.as_ref()?;
-    let proj = ViewProjection::new(cam, f64::from(w), f64::from(h));
+    let (w, h) = (proj.w as u32, proj.h as u32);
     let view = Rect::new(0, 0, w as i32, h as i32);
-    let v = to_view(m, &proj, view, doc.size.width as i32, doc.size.height as i32);
+    let v = to_view(m, proj, view, doc.size.width as i32, doc.size.height as i32);
     let mut out = Vec::new();
     v.read_region_into(view, &mut out);
     Some(out.iter().map(|c| (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect())

@@ -10,7 +10,10 @@ struct View {
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
     i: vec4<f32>, // viewer channel (0 RGB, 1 R, 2 G, 3 B, 4 A, 5 luminance), unused ×3
     j: vec4<f32>, // live projection: on (1), yaw, pitch (radians), view-plane units per device px
-    k: vec4<f32>, // live projection: view centre x, y (device px), unused, unused
+    k: vec4<f32>, // live projection: view centre x, y (device px); rotated latlong: panorama height (device px), unused
+    l: vec4<f32>, // rotated latlong: rotation column 0 (shown right → document), panorama origin x (device px)
+    m: vec4<f32>, // rotated latlong: rotation column 1 (up), panorama origin y (device px)
+    n: vec4<f32>, // rotated latlong: rotation column 2 (forward), panorama width (device px)
 };
 struct Tile { r: vec4<f32>, core: vec4<f32> }; // x, y, w, h in doc px; drawn x0, y0, x1, y1
 
@@ -368,20 +371,41 @@ fn proj_lod(k: f32, dx: f32, dy: f32, lat: f32, size_doc: vec2<f32>) -> f32 {
 @fragment
 fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     // engine::equirect::ViewProjection::view_to_dir, then dir_to_equirect.
-    let k = view.j.w;
-    let dx = (in.pos.x - view.k.x) * k;
-    let dy = -(in.pos.y - view.k.y) * k;
-    let sy = sin(view.j.y);
-    let cy = cos(view.j.y);
-    let sp = sin(view.j.z);
-    let cp = cos(view.j.z);
-    let f = vec3(cp * sy, sp, cp * cy);
-    let r = vec3(cy, 0.0, -sy);
-    let u = vec3(-sp * sy, cp, -sp * cy);
-    let dir = normalize(f + dx * r + dy * u);
+    let size_doc = view.b.zw;
+    var dir: vec3<f32>;
+    var lod_x = 0.0;
+    if (view.j.x > 1.5) {
+        // A rotated latlong (Window › Spherical): the shown panorama's own direction, turned.
+        let pw = view.n.w;
+        let ph = view.k.z;
+        let e = in.pos.xy - vec2(view.l.w, view.m.w);
+        if (e.y < 0.0 || e.y >= ph || e.x < 0.0 || e.x >= pw) {
+            discard;
+        }
+        let lon0 = (e.x / pw - 0.5) * 2.0 * PI;
+        let lat0 = clamp((0.5 - e.y / ph) * PI, -0.5 * PI, 0.5 * PI);
+        let c0 = cos(lat0);
+        let local = vec3(c0 * sin(lon0), sin(lat0), c0 * cos(lon0));
+        dir = normalize(local.x * view.l.xyz + local.y * view.m.xyz + local.z * view.n.xyz);
+        // Document pixels per device pixel, as on the flat canvas.
+        lod_x = max(log2(max(size_doc.x / pw, 1e-6)) - 0.5, 0.0);
+    } else {
+        let k = view.j.w;
+        let dx = (in.pos.x - view.k.x) * k;
+        let dy = -(in.pos.y - view.k.y) * k;
+        let sy = sin(view.j.y);
+        let cy = cos(view.j.y);
+        let sp = sin(view.j.z);
+        let cp = cos(view.j.z);
+        let f = vec3(cp * sy, sp, cp * cy);
+        let r = vec3(cy, 0.0, -sy);
+        let u = vec3(-sp * sy, cp, -sp * cy);
+        dir = normalize(f + dx * r + dy * u);
+        let lat_p = asin(clamp(dir.y, -1.0, 1.0));
+        lod_x = proj_lod(k, dx, dy, lat_p, size_doc);
+    }
     let lon = atan2(dir.x, dir.z);
     let lat = asin(clamp(dir.y, -1.0, 1.0));
-    let size_doc = view.b.zw;
     var d = vec2((lon / (2.0 * PI) + 0.5) * size_doc.x, (0.5 - lat / PI) * size_doc.y);
     d.x = d.x - floor(d.x / size_doc.x) * size_doc.x;
     d.y = clamp(d.y, 0.0, size_doc.y - 0.001);
@@ -390,8 +414,7 @@ fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     if (any(t < vec2(0.0)) || any(t >= size)) {
         discard;
     }
-    let lod = proj_lod(k, dx, dy, lat, size_doc);
-    let col = textureSampleLevel(tex, samp, t / size, lod);
+    let col = textureSampleLevel(tex, samp, t / size, lod_x);
     return shade(col, d, 0.0, 1.0, in.pos.xy);
 }
 "#;

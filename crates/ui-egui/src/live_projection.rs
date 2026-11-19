@@ -40,22 +40,96 @@ pub struct ProjectionView {
     /// stroke after the source was set (row-major 3×3).
     #[serde(default)]
     pub clone_rotation: Option<[f64; 9]>,
+    /// Window › Spherical: show the panorama flat again (a rotated latlong) instead of through
+    /// the perspective camera. Yaw and pitch turn it; `roll` too.
+    #[serde(default)]
+    pub latlong: bool,
+    /// Rotated latlong: turn about the view direction (degrees).
+    #[serde(default)]
+    pub roll: f32,
+    /// Rotated latlong: view device pixels per document pixel (0 fits the whole panorama).
+    #[serde(default)]
+    pub scale: f32,
+    /// Rotated latlong: the document row at the view's middle (negative: the equator).
+    #[serde(default = "neg_one")]
+    pub center_v: f32,
+}
+
+fn neg_one() -> f32 {
+    -1.0
 }
 
 impl Default for ProjectionView {
     fn default() -> Self {
-        ProjectionView { yaw: 0.0, pitch: 0.0, fov: 90.0, zoom: 0.0, clone_source: None, clone_rotation: None }
+        ProjectionView {
+            yaw: 0.0,
+            pitch: 0.0,
+            fov: 90.0,
+            zoom: 0.0,
+            clone_source: None,
+            clone_rotation: None,
+            latlong: false,
+            roll: 0.0,
+            scale: 0.0,
+            center_v: -1.0,
+        }
     }
 }
 
 impl ProjectionView {
+    /// How this view maps a `w` × `h` device-pixel view onto a `doc` (width, height) latlong.
+    pub fn projection(&self, w: f64, h: f64, doc: [f64; 2]) -> ViewProjection {
+        if self.latlong {
+            let cv = if self.center_v >= 0.0 { f64::from(self.center_v) } else { doc[1] / 2.0 };
+            return ViewProjection::latlong(f64::from(self.yaw), f64::from(self.pitch), f64::from(self.roll), w, h, doc[0], doc[1], f64::from(self.scale), cv);
+        }
+        ViewProjection::new(self.camera(), w, h)
+    }
+
+    /// Rotated latlong: pan by a pointer drag of `d` device pixels over a `doc` latlong drawn at
+    /// `scale` device pixels per document pixel. Across turns the yaw (the panorama wraps, so
+    /// there is no edge); down moves the centre row.
+    pub fn pan_latlong(&mut self, d: egui::Vec2, scale: f64, doc: [f64; 2]) {
+        if scale.is_nan() || scale <= 0.0 {
+            return;
+        }
+        let deg_per_px = 360.0 / (doc[0] * scale);
+        self.yaw = wrap_deg(f64::from(self.yaw) - f64::from(d.x) * deg_per_px) as f32;
+        let cv = if self.center_v >= 0.0 { f64::from(self.center_v) } else { doc[1] / 2.0 };
+        self.center_v = (cv - f64::from(d.y) / scale).clamp(0.0, doc[1]) as f32;
+    }
+
+    /// Rotated latlong: zoom by `f` (> 1 zooms in) from the current scale (`fit` when it fits).
+    pub fn zoom_latlong(&mut self, f: f64, fit: f64) {
+        let cur = if self.scale > 0.0 { f64::from(self.scale) } else { fit };
+        if f.is_finite() && f > 0.0 && cur.is_finite() {
+            self.scale = (cur * f).clamp(fit.min(1.0) * 0.5, 32.0) as f32;
+        }
+    }
+
     pub fn camera(&self) -> Camera {
         Camera { yaw: f64::from(self.yaw), pitch: f64::from(self.pitch), fov: f64::from(self.fov) }.normalized()
     }
 
     pub(crate) fn clamp(&mut self) {
+        let pitch = self.pitch;
         let c = self.camera();
         (self.yaw, self.pitch, self.fov) = (c.yaw as f32, c.pitch as f32, c.fov as f32);
+        if self.latlong {
+            self.clamp_latlong();
+            // A rotated latlong may look straight up or down.
+            self.pitch = if pitch.is_finite() { pitch.clamp(-90.0, 90.0) } else { 0.0 };
+        }
+    }
+
+    /// Yaw and roll wrapped, pitch within ±90°, zoom and centre row sane (rotated latlong).
+    pub(crate) fn clamp_latlong(&mut self) {
+        let f = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        self.yaw = wrap_deg(f64::from(f(self.yaw, 0.0))) as f32;
+        self.roll = wrap_deg(f64::from(f(self.roll, 0.0))) as f32;
+        self.pitch = f(self.pitch, 0.0).clamp(-90.0, 90.0);
+        self.scale = f(self.scale, 0.0).clamp(0.0, 32.0);
+        self.center_v = f(self.center_v, -1.0);
     }
 
     /// Look by a pointer drag of `d` points in a view `h` points tall: the image follows the
@@ -81,6 +155,11 @@ pub(crate) fn brush_scale(app: &PhotocraftApp, cam: &ProjectionView, vp: &ViewPr
         return 1.0;
     }
     let iw = app.session.documents().get(idx).map_or(1.0, |d| f64::from(d.doc.size.width.max(1)));
+    if let Some([_, _, pw, _]) = vp.latlong_rect() {
+        // Rotated latlong: the drawn scale (exact at the shown equator).
+        let s = pw / iw;
+        return if s.is_finite() && s > 0.0 { s as f32 } else { 1.0 };
+    }
     let half = (cam.camera().fov.to_radians() / 2.0).tan();
     let s = std::f64::consts::TAU / iw * (vp.h / 2.0) / half;
     if s.is_finite() && s > 0.0 { s as f32 } else { 1.0 }
@@ -196,9 +275,17 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_gray(28));
     let mut cam = view.projection.unwrap_or_default();
-    // The zoom commands act on `view.zoom`: turn their change into a field of view change.
+    let doc_wh = app.session.documents().get(idx).map_or([2.0, 1.0], |d| [f64::from(d.doc.size.width.max(1)), f64::from(d.doc.size.height.max(1))]);
+    let (vw, vh) = (f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
+    let fit = (vw / doc_wh[0]).min(vh / doc_wh[1]);
+    // The zoom commands act on `view.zoom`: turn their change into a field of view change (a
+    // zoom of the rotated latlong).
     if cam.zoom > 0.0 && view.zoom > 0.0 && (view.zoom - cam.zoom).abs() > 1e-6 {
-        cam.scale_fov(cam.zoom / view.zoom);
+        if cam.latlong {
+            cam.zoom_latlong(f64::from(view.zoom / cam.zoom), fit);
+        } else {
+            cam.scale_fov(cam.zoom / view.zoom);
+        }
     }
     cam.zoom = view.zoom;
     view.fit_pending = false;
@@ -216,16 +303,23 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     }
     let paints = (matches!(tool, Tool::Brush | Tool::Eraser | Tool::CloneStamp) || retouch_cmd(app, tool, false).is_some()) && !looking;
 
-    // Wheel: field of view about the view centre.
+    // Wheel: field of view about the view centre (the rotated latlong: zoom).
     if response.hovered() {
         let dy = ctx.input(|i| i.smooth_scroll_delta.y);
         if dy != 0.0 {
-            cam.scale_fov((-dy * 0.002).exp());
+            if cam.latlong {
+                cam.zoom_latlong(f64::from((dy * 0.002).exp()), fit);
+            } else {
+                cam.scale_fov((-dy * 0.002).exp());
+            }
         }
     }
     // Keyboard look (arrows, Home) runs with the app's arrow keys: `move_mods::arrow_keys`.
     if response.dragged() && (looking || !paints) {
-        if looking {
+        if looking && cam.latlong {
+            let s = if cam.scale > 0.0 { f64::from(cam.scale) } else { fit };
+            cam.pan_latlong(response.drag_delta() * ppp, s, doc_wh);
+        } else if looking {
             cam.look(response.drag_delta(), rect.height());
         }
     }
@@ -242,7 +336,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     // What the view shows on the latlong: the GPU budget focuses there and a background
     // redraw (large documents, v0.10) finishes those blocks first.
     let seen = {
-        let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
+        let vp = cam.projection(vw, vh, doc_wh);
         let rects = photocraft_engine::equirect::view_rect_to_equirect(&vp, [0.0, 0.0, vp.w, vp.h], doc.size.width, doc.size.height, 2.0);
         rects.iter().fold(photocraft_geom::Rect::EMPTY, |acc, r| {
             let r = photocraft_geom::Rect::new(r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32);
@@ -267,7 +361,13 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             hdr: crate::canvas::hdr_preview(app, &doc),
             offset: [0.0, 0.0],
             channel: app.session.color.viewer_channel(doc.id).code(),
-            projection: Some([cam.yaw, cam.pitch, cam.fov]),
+            projection: Some(crate::gpu_canvas::ProjectionParams {
+                camera: [cam.yaw, cam.pitch, cam.fov],
+                latlong: {
+                    let vp = cam.projection(vw, vh, doc_wh);
+                    vp.latlong_rot().zip(vp.latlong_rect()).map(|(q, r)| (q.map(|row| row.map(|v| v as f32)), r.map(|v| v as f32 / ppp)))
+                },
+            }),
         };
         crate::gpu_canvas::GpuCanvas::paint(&painter, rect, params);
     } else {
@@ -283,7 +383,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
 
     // Painting: collect the stroke in view device pixels, commit it on release.
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
-    let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
+    let vp = cam.projection(vw, vh, doc_wh);
     let brush_scale = brush_scale(app, &cam, &vp, idx);
     let size_px = app.session.tools.brush.size * brush_scale;
     let cloning = matches!(tool, Tool::CloneStamp | Tool::Healing);
@@ -493,7 +593,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             }
         }
     } else if crate::live_projection_select::supported(tool) && !looking {
-        crate::live_projection_select::tool(app, &ctx, &response, &painter, rect, ppp, cam.camera(), idx, tool);
+        crate::live_projection_select::tool(app, &ctx, &response, &painter, rect, ppp, vp, idx, tool);
     } else if looking {
         // Only over the canvas (or while dragging from it): the cursor is per frame and global.
         if response.dragged() {
@@ -527,7 +627,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             crate::canvas_tool_menu::open_at(app, &ctx, tool, [p.x, p.y], Some(d));
         }
     }
-    crate::live_projection_select::ants(app, &ctx, &painter, rect, ppp, cam.camera(), idx);
+    crate::live_projection_select::ants(app, &ctx, &painter, rect, ppp, vp, idx);
     app.projection_view_px = Some((idx, vp.w, vp.h));
     // Count, Note and Color Sampler markers, through the sphere (hidden behind the camera).
     if let Some((iw, ih)) = app.session.documents().get(idx).map(|st| (f64::from(st.doc.size.width), f64::from(st.doc.size.height))) {
@@ -722,7 +822,7 @@ fn patch(
                     }
                     return;
                 }
-                if let Some(p) = crate::live_projection_select::params(app, Tool::Lasso, mode, &points, cam.camera(), vp.w, vp.h)
+                if let Some(p) = crate::live_projection_select::params(app, Tool::Lasso, mode, &points, *vp, vp.w, vp.h)
                     && let Err(e) = app.run("select.projected", p)
                 {
                     app.ui.status = e;
@@ -950,8 +1050,8 @@ fn bytemuck_flat(px: &[[u8; 4]]) -> &[u8] {
     px.as_flattened()
 }
 
-fn view_json(cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
-    json!({"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": vp.w, "height": vp.h})
+fn view_json(_cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
+    vp.to_json()
 }
 
 /// `paint.projectedStroke` params (without points) for the Brush or Eraser.

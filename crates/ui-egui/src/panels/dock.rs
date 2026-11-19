@@ -320,6 +320,7 @@ pub(crate) fn dock_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, group: crate
         (Group::Character, tab) => crate::type_tool::character_panel(app, ui, tab == 1),
         (Group::Navigator, 0) => navigator(app, ui),
         (Group::Navigator, 1) => crate::histogram_panel::show(app, ui),
+        (Group::Navigator, 3) => crate::spherical_panel::panel(app, ui),
         (Group::Navigator, _) => info_panel(app, ui),
         (Group::History, 0) => history(app, ui),
         (Group::History, 1) => crate::actions::panel(app, ui),

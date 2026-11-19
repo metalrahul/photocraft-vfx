@@ -34,6 +34,7 @@ const PANELS: &[(&str, &str, Group)] = &[
     ("navigator", "Navigator", Group::Navigator),
     ("histogram", "Histogram", Group::Navigator),
     ("info", "Info", Group::Navigator),
+    ("spherical", "Spherical", Group::Navigator),
     ("history", "History", Group::History),
     ("actions", "Actions", Group::History),
     ("layerComps", "Layer Comps", Group::History),

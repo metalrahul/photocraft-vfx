@@ -21,7 +21,7 @@ use photocraft_raster::Surface;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
-use crate::equirect::{Camera, Rot, ViewProjection, dir_to_equirect, equirect_to_dir, rot, rot_from_slice, view_rect_to_equirect};
+use crate::equirect::{Rot, ViewProjection, dir_to_equirect, equirect_to_dir, rot, rot_from_slice, view_rect_to_equirect};
 use crate::{EngineError, Result, Session};
 
 fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
@@ -36,7 +36,7 @@ pub fn projection_of(p: &Value, cmd: &str) -> Result<ViewProjection> {
     if !(w >= 1.0 && h >= 1.0 && w <= 16384.0 && h <= 16384.0) {
         return Err(bad(cmd, "`projection.width` and `height` must be 1..=16384"));
     }
-    Ok(ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h))
+    Ok(ViewProjection::from_json(q, w, h))
 }
 
 /// A row band `[y0, y1)` of a surface, full width, sampled with wrap-around in x.
@@ -769,7 +769,7 @@ impl XformPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::equirect::rotation_between;
+    use crate::equirect::{Camera, rotation_between};
 
     /// A 2048×1024 F32 latlong: gradient, HDR, an `inf` and a `NaN`, and a red square at
     /// (1000..1040, 500..540).

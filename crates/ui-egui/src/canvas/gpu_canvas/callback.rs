@@ -75,10 +75,21 @@ impl CanvasCallback {
         let grid = if p.pixel_grid && crate::pixel_grid::shows_at(p.zoom * ppp) { crate::pixel_grid::STRENGTH } else { 0.0 };
         let square = if style.checker_square > 0.0 { (style.checker_square * ppp).round().max(1.0) } else { 0.0 };
         let (l, d, g) = (style.checker_light, style.checker_dark, style.gamut_color);
-        // Live projection: flag, yaw, pitch (radians), view-plane units per device pixel, and the
-        // view's centre in device pixels.
+        // Live projection: flag (1 perspective, 2 rotated latlong), yaw, pitch (radians),
+        // view-plane units per device pixel, and the view's centre in device pixels; a rotated
+        // latlong adds its panorama's height and the rotation's columns with its origin and width
+        // (device pixels).
+        let mut lat = [0.0f32; 13];
         let proj = match p.projection {
-            Some([yaw, pitch, fov]) if yaw.is_finite() && pitch.is_finite() && fov.is_finite() => {
+            Some(super::ProjectionParams { latlong: Some((q, [x, y, w, h])), .. })
+                if q.iter().flatten().all(|v| v.is_finite()) && [x, y, w, h].iter().all(|v| v.is_finite()) && w > 0.0 && h > 0.0 =>
+            {
+                let c = self.rect.center();
+                let (ox, oy) = ((self.rect.min.x + x) * ppp, (self.rect.min.y + y) * ppp);
+                lat = [h * ppp, q[0][0], q[1][0], q[2][0], ox, q[0][1], q[1][1], q[2][1], oy, q[0][2], q[1][2], q[2][2], w * ppp];
+                [2.0, 0.0, 0.0, 0.0, c.x * ppp, c.y * ppp]
+            }
+            Some(super::ProjectionParams { camera: [yaw, pitch, fov], .. }) if yaw.is_finite() && pitch.is_finite() && fov.is_finite() => {
                 let h = (self.rect.height() * ppp).max(1.0);
                 let c = self.rect.center();
                 [1.0, yaw.to_radians(), pitch.to_radians(), (fov.to_radians() / 2.0).tan() / (h / 2.0), c.x * ppp, c.y * ppp]
@@ -139,8 +150,20 @@ impl CanvasCallback {
             proj[3],
             proj[4],
             proj[5],
+            lat[0],
             0.0,
-            0.0,
+            lat[1],
+            lat[2],
+            lat[3],
+            lat[4],
+            lat[5],
+            lat[6],
+            lat[7],
+            lat[8],
+            lat[9],
+            lat[10],
+            lat[11],
+            lat[12],
         ]
     }
 }
