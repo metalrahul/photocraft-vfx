@@ -57,7 +57,7 @@ blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 flate2 = { workspace = true }
 roxmltree = "0.21"
 # Reuse usvg's locked header reader to bound embedded SVG raster data before decoding.
-imagesize = "0.13"
+imagesize = "0.15"
 # SVG import (svg.rs): usvg parses, resvg rasterises what the shape model can't hold. Both are
 # already in the tree through the UI's icon loader; text shaping needs the fonts feature set.
 
@@ -71,7 +71,7 @@ craft-pdf = { workspace = true }
 kurbo = { version = "0.13", optional = true }
 
 [dev-dependencies]
-lopdf = { version = "0.38", default-features = false }
+lopdf = { version = "0.47", default-features = false }
 # PDF XMP serialization assertions parse output XML in tests.
 roxmltree = "0.21"
 miniz_oxide = "0.9"
