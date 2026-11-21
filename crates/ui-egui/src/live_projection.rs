@@ -165,6 +165,64 @@ pub(crate) fn brush_scale(app: &PhotocraftApp, cam: &ProjectionView, vp: &ViewPr
     if s.is_finite() && s > 0.0 { s as f32 } else { 1.0 }
 }
 
+/// Photoshop's on-canvas brush resize in the projection view (`brush_resize`): Alt+right-drag, or
+/// Ctrl+Alt+drag. Sideways sets the size, up and down the hardness (or the opacity, with "Vary
+/// Round Brush Hardness on HUD" off); the circle stays where the drag began. `z` is screen points
+/// per brush-Size unit. True while a resize is in progress (the tool then doesn't paint).
+fn brush_resize(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, tool: Tool, z: f32) -> bool {
+    type Rz = (f32, f32, egui::Pos2, bool, u64);
+    let id = egui::Id::new("projection_brush_resize");
+    let (mods, sec_down, prim_down) = ctx.input(|i| (i.modifiers, i.pointer.button_down(PointerButton::Secondary), i.pointer.primary_down()));
+    let mut rz: Option<Rz> = ctx.data(|d| d.get_temp(id));
+    if let Some(r) = rz
+        && !(if r.3 { sec_down } else { prim_down })
+    {
+        rz = None;
+        ctx.data_mut(|d| d.remove::<Rz>(id));
+    }
+    if rz.is_none() && crate::brush_resize::applies(tool) && response.hovered() {
+        let (sec, prim) = ctx.input(|i| (i.pointer.button_pressed(PointerButton::Secondary), i.pointer.button_pressed(PointerButton::Primary)));
+        let sec = sec && crate::brush_resize::is_right_gesture(mods);
+        let prim = prim && crate::brush_resize::is_gesture(mods);
+        if (sec || prim)
+            && let Some(p) = ctx.input(|i| i.pointer.interact_pos())
+        {
+            let vary = app.session.prefs().tools.vary_round_brush_hardness_on_hud;
+            let b = &app.session.tools.brush;
+            static KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let r = (b.size, if vary { b.hardness } else { b.opacity }, p, sec, KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            ctx.data_mut(|d| d.insert_temp(id, r));
+            rz = Some(r);
+        }
+    }
+    let Some((s0, v0, anchor, _, key)) = rz else { return false };
+    let z = if z.is_finite() && z > 0.0 { z } else { 1.0 };
+    let vary = app.session.prefs().tools.vary_round_brush_hardness_on_hud;
+    if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
+        let d = p - anchor;
+        let dy = if vary { d.y } else { d.y * crate::brush_resize::HARDNESS_TRAVEL / crate::brush_resize::OPACITY_TRAVEL };
+        let (size, v) = crate::brush_resize::resized((s0, v0), f64::from(d.x / z), f64::from(dy / z), z);
+        let b = &app.session.tools.brush;
+        if b.size != size || (if vary { b.hardness } else { b.opacity }) != v {
+            let brush = if vary { json!({ "size": size, "hardness": v }) } else { json!({ "size": size, "opacity": v }) };
+            if let Err(e) = app.run("tools.setBrush", json!({ "brush": brush, "coalesce": format!("brush-resize:p{key}") })) {
+                app.ui.status = e;
+            }
+        }
+    }
+    let b = &app.session.tools.brush;
+    let r = (b.size * z / 2.0).max(1.0);
+    painter.circle_stroke(anchor, r, egui::Stroke::new(2.5, Color32::from_black_alpha(140)));
+    painter.circle_stroke(anchor, r, egui::Stroke::new(1.0, Color32::WHITE));
+    let (label, val) = if vary { ("Hardness", b.hardness) } else { ("Opacity", b.opacity) };
+    let text = format!("{} {:.0} px   {} {:.0}%", tl!("Size"), b.size, tl!(label), val * 100.0);
+    if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
+        painter.text(p + egui::vec2(16.0, 16.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(12.0), Color32::WHITE);
+    }
+    ctx.set_cursor_icon(egui::CursorIcon::None);
+    true
+}
+
 /// Run `f` with the brush Size scaled by `k` (restored after).
 fn with_brush_scale<R>(app: &mut PhotocraftApp, k: f32, f: impl FnOnce(&mut PhotocraftApp) -> R) -> R {
     if k == 1.0 {
@@ -412,7 +470,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     let alt = ctx.input(|i| i.modifiers.alt);
     // Free Transform's handles take the pointer while it is up, whatever the tool.
     let transforming = crate::live_projection_xform::transform(app, &ctx, &response, &painter, rect, ppp, idx);
-    if transforming {
+    let resizing = !transforming && !looking && brush_resize(app, &ctx, &response, &painter, tool, brush_scale / ppp);
+    if transforming || resizing {
     } else if paints && cloning && alt {
         // ⌥/Alt-click (or press) sets the source: a direction, so looking around keeps it.
         if (response.clicked() || response.drag_started())
@@ -430,8 +489,9 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         }
     } else if paints {
         let pressure = f64::from(app.stylus.pressure());
-        // Right-click: the Brush Preset picker, as on the flat canvas.
+        // Right-click: the Brush Preset picker, as on the flat canvas (Alt+right-drag resizes).
         if response.secondary_clicked()
+            && !alt
             && let Some(p) = response.interact_pointer_pos()
         {
             crate::brush_picker::open(&mut app.ui, &ctx, [p.x, p.y]);

@@ -8,10 +8,7 @@
 //! panorama flat, turned by yaw, pitch and roll, so a seam or a pole can be brought to the middle
 //! and painted across; **Perspective** is Equirectangular Live Projection's camera. Either way the
 //! rotation is a view setting: strokes are written back through it, so the pixels keep their
-//! orientation until **Bake Rotation** turns the active layer for real.
-
-use photocraft_engine::equirect::latlong_rotation;
-use serde_json::json;
+//! orientation.
 
 use crate::PhotocraftApp;
 use crate::live_projection::ProjectionView;
@@ -98,21 +95,11 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             (cam.scale, cam.center_v) = (0.0, -1.0);
         }
     });
-    let rotated = cam.yaw != 0.0 || cam.pitch != 0.0 || cam.roll != 0.0;
-    ui.add_space(4.0);
-    let bake = ui
-        .add_enabled_ui(cam.latlong && rotated, |ui| widgets::compact_button(ui, tl!("Bake Rotation"), 22.0))
-        .inner
-        .on_hover_text(tl!("Turn the active layer's pixels (or the selected part) by this rotation, then show it unrotated"));
-
     if cam != before
         && let Some(v) = app.ui.views.get_mut(idx).and_then(|v| v.projection.as_mut())
     {
         *v = cam;
         v.clamp_latlong();
-    }
-    if bake.clicked() {
-        bake_rotation(app, idx, cam);
     }
 
     ui.add_space(6.0);
@@ -155,22 +142,4 @@ fn shortcuts(app: &PhotocraftApp, ui: &mut egui::Ui, latlong: bool) {
             }
         });
     });
-}
-
-/// Bake Rotation: turn the active layer so the document shows what the rotated latlong shows,
-/// then reset the view's rotation (the picture stays where it is).
-fn bake_rotation(app: &mut PhotocraftApp, idx: usize, cam: ProjectionView) {
-    // The view shows document direction `R · d` at view direction `d`; the baked layer must hold
-    // that at `d`. layer.projectedRotate's `q` makes pixel `d` sample `qᵀ · d`, so q = Rᵀ.
-    let r = latlong_rotation(f64::from(cam.yaw), f64::from(cam.pitch), f64::from(cam.roll));
-    let q = [[r[0][0], r[1][0], r[2][0]], [r[0][1], r[1][1], r[2][1]], [r[0][2], r[1][2], r[2][2]]];
-    match app.run("layer.projectedRotate", json!({"rotation": q.concat()})) {
-        Ok(_) => {
-            if let Some(v) = app.ui.views.get_mut(idx).and_then(|v| v.projection.as_mut()) {
-                (v.yaw, v.pitch, v.roll) = (0.0, 0.0, 0.0);
-            }
-            app.ui.status = tl!("Rotation baked into the layer").into();
-        }
-        Err(e) => app.ui.status = e,
-    }
 }
