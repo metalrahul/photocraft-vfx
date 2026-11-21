@@ -52,13 +52,17 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     {
         hint(ui, &format!("{} ({w} × {h})", tl!("Spherical tools expect a 2:1 latlong")));
     }
-    let Some(mut cam) = app.ui.views.get(idx).and_then(|v| v.projection) else {
+    if app.ui.views.get(idx).and_then(|v| v.projection).is_none() {
         hint(ui, tl!("Turn on Show in Main Window to rotate the panorama while you paint."));
         shortcuts(app, ui, false);
         return;
-    };
-    let before = cam;
+    }
 
+    // The latlong map: where the view looks; click or drag to point it, the wheel zooms.
+    ui.add_space(4.0);
+    map(app, ui, idx);
+    let Some(mut cam) = app.ui.views.get(idx).and_then(|v| v.projection) else { return };
+    let before = cam;
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui.selectable_label(cam.latlong, tl!("Latlong")).clicked() {
@@ -114,6 +118,27 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
     hint(ui, tl!("Paint as usual: strokes are written back through the rotation, so the pixels keep their orientation."));
     shortcuts(app, ui, cam.latlong);
+}
+
+/// The document as a latlong with the view's outline, like the Navigator's preview; clicking or
+/// dragging points the view (`live_projection_misc::navigator`).
+fn map(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) {
+    let t = Tokens::get(ui.ctx());
+    let ctx = ui.ctx().clone();
+    let Some(size) = app.session.documents().get(idx).map(|d| d.doc.size) else { return };
+    let w = ui.available_width().max(60.0);
+    let h = (w * size.height.max(1) as f32 / size.width.max(1) as f32).clamp(30.0, 220.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
+    ui.painter().rect_filled(rect, t.radius_sm, t.canvas);
+    if let Some(params) = crate::canvas::navigator_gpu_view(app, idx, rect, &ctx) {
+        crate::gpu_canvas::GpuCanvas::paint(ui.painter(), rect, params);
+    } else if !crate::canvas::navigator_waits_for_gpu(app, idx, &ctx)
+        && let Some(tex) = crate::canvas::navigator_texture(app, &ctx, idx)
+    {
+        ui.painter().image(tex, rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+    }
+    crate::live_projection_misc::navigator(app, ui, &ctx, &resp, idx, rect, true);
+    resp.on_hover_text(tl!("Click or drag to point the view; the wheel zooms"));
 }
 
 /// The view's keys and mouse gestures, listed in the panel.

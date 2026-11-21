@@ -171,27 +171,43 @@ pub(crate) fn frustum(app: &PhotocraftApp, idx: usize, rect: Rect) -> Vec<Vec<Po
     lines
 }
 
-/// The Navigator in live projection: draws the frustum; a click or drag turns the view to look
-/// at that point and the wheel changes the field of view. Returns false when the view is flat.
-pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &egui::Ui, ctx: &egui::Context, resp: &egui::Response, idx: usize, rect: Rect) -> bool {
+/// A latlong map of the document in live projection (the Navigator, and the Spherical panel's
+/// map): draws the view's frustum. With `interactive` (the Spherical panel, where every spherical
+/// control lives) a click or drag turns the view to look at that point (the rotated latlong:
+/// that longitude, and that row at the middle) and the wheel changes the field of view (zoom).
+/// Returns false when the view is flat.
+pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &egui::Ui, ctx: &egui::Context, resp: &egui::Response, idx: usize, rect: Rect, interactive: bool) -> bool {
     if !crate::live_projection::active(app, idx) {
         return false;
     }
-    if (resp.clicked() || resp.dragged())
+    let (w, h) = doc_size(app, idx);
+    if interactive
+        && (resp.clicked() || resp.dragged())
         && let Some(pp) = resp.interact_pointer_pos()
         && let Some(cam) = app.ui.views[idx].projection.as_mut()
     {
         let (fx, fy) = ((pp.x - rect.min.x) / rect.width().max(1.0), (pp.y - rect.min.y) / rect.height().max(1.0));
         cam.yaw = (fx.clamp(0.0, 1.0) - 0.5) * 360.0;
-        cam.pitch = (0.5 - fy.clamp(0.0, 1.0)) * 180.0;
+        if cam.latlong {
+            cam.center_v = fy.clamp(0.0, 1.0) * h as f32;
+        } else {
+            cam.pitch = (0.5 - fy.clamp(0.0, 1.0)) * 180.0;
+        }
         cam.clamp();
     }
-    if resp.hovered() {
+    if interactive && resp.hovered() {
         let dy = ctx.input(|i| i.smooth_scroll_delta.y);
-        if dy != 0.0
-            && let Some(cam) = app.ui.views[idx].projection.as_mut()
-        {
-            cam.scale_fov((-dy * 0.002).exp());
+        if dy != 0.0 {
+            let c = app.last_canvas_rect;
+            let ppp = app.canvas_ppp();
+            let fit = (f64::from(c.width() * ppp) / w).min(f64::from(c.height() * ppp) / h);
+            if let Some(cam) = app.ui.views[idx].projection.as_mut() {
+                if cam.latlong {
+                    cam.zoom_latlong(f64::from((dy * 0.002).exp()), fit);
+                } else {
+                    cam.scale_fov((-dy * 0.002).exp());
+                }
+            }
         }
     }
     let red = Stroke::new(1.5, Color32::from_rgb(255, 84, 84));

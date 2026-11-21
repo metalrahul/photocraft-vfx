@@ -29,8 +29,9 @@ pub(super) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.painter().image(tex, rect, Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
     }
     let s = rect.width() / size.width.max(1) as f32;
-    // Live projection: the view's frustum on the latlong; a click looks there.
-    if !crate::live_projection_misc::navigator(app, ui, &ctx, &resp, idx, rect) {
+    // Live projection: the view's frustum on the latlong (pointing the view is the Spherical
+    // panel's map, with the other spherical controls).
+    if !crate::live_projection_misc::navigator(app, ui, &ctx, &resp, idx, rect, false) {
         // ⌘/Ctrl-drag over the preview draws a rectangle the view then zooms to, as in Photoshop
         // (#6872); a plain click or drag moves the view.
         let command = crate::workspace_ui::sticky_mods(app, ctx.input(|i| i.modifiers)).command;
