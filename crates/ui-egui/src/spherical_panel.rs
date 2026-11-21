@@ -1,6 +1,9 @@
 //! Window › Spherical: a dockable panel (a tab of the Navigator group) that turns a latlong
 //! panorama while you keep painting, like Nuke's SphericalTransform rotation.
 //!
+//! Every spherical control lives here; the main window only turns spherical when **Show in Main
+//! Window** is on (or View › Equirectangular Live Projection, its shortcut).
+//!
 //! It drives the document view's live projection (live_projection.rs): **Latlong** shows the
 //! panorama flat, turned by yaw, pitch and roll, so a seam or a pole can be brought to the middle
 //! and painted across; **Perspective** is Equirectangular Live Projection's camera. Either way the
@@ -28,9 +31,14 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let size = app.session.documents().get(idx).map(|d| (d.doc.size.width, d.doc.size.height));
     let on = crate::live_projection::active(app, idx);
 
-    // On / off, and which view.
+    // On / off in the main window, and which view.
     let mut want = on;
-    widgets::toggle(ui, &mut want, tl!("Spherical View"));
+    let toggle_sc = crate::shortcuts::shortcut_label(app, "view.equirectLiveProjection");
+    let r = widgets::toggle(ui, &mut want, tl!("Show in Main Window"));
+    r.on_hover_text(match &toggle_sc {
+        Some(sc) => format!("{} ({sc})", tl!("Show the document spherically in the main window")),
+        None => tl!("Show the document spherically in the main window").to_string(),
+    });
     if want != on {
         let r = crate::live_projection::toggle(app, idx, Some(want));
         if let Err(e) = r {
@@ -48,7 +56,8 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         hint(ui, &format!("{} ({w} × {h})", tl!("Spherical tools expect a 2:1 latlong")));
     }
     let Some(mut cam) = app.ui.views.get(idx).and_then(|v| v.projection) else {
-        hint(ui, tl!("Turn on Spherical View to rotate the panorama while you paint."));
+        hint(ui, tl!("Turn on Show in Main Window to rotate the panorama while you paint."));
+        shortcuts(app, ui, false);
         return;
     };
     let before = cam;
@@ -106,15 +115,46 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         bake_rotation(app, idx, cam);
     }
 
+    ui.add_space(6.0);
+    let mut doc_px = app.ui.tool_options.projection_brush_doc_px;
+    if widgets::checkbox(ui, &mut doc_px, tl!("Brush Size in Document Pixels"))
+        .on_hover_text(tl!("Measure the brush Size in latlong pixels at the view's centre instead of screen pixels"))
+        .changed()
+    {
+        app.ui.tool_options.projection_brush_doc_px = doc_px;
+    }
+
     ui.add_space(8.0);
-    hint(
-        ui,
-        if cam.latlong {
-            tl!("Paint as usual: strokes go back through the rotation. Space-drag or middle-drag pans (sideways turns the yaw); the wheel zooms.")
-        } else {
-            tl!("Space-drag or middle-drag looks around; the wheel sets the field of view.")
-        },
-    );
+    hint(ui, tl!("Paint as usual: strokes are written back through the rotation, so the pixels keep their orientation."));
+    shortcuts(app, ui, cam.latlong);
+}
+
+/// The view's keys and mouse gestures, listed in the panel.
+fn shortcuts(app: &PhotocraftApp, ui: &mut egui::Ui, latlong: bool) {
+    let t = Tokens::get(ui.ctx());
+    let toggle = crate::shortcuts::shortcut_label(app, "view.equirectLiveProjection").unwrap_or_else(|| "—".into());
+    let look = if latlong { tl!("Pan (sideways turns the yaw)") } else { tl!("Look around") };
+    let zoom = if latlong { tl!("Zoom") } else { tl!("Field of view") };
+    let rows: [(String, &str); 8] = [
+        (toggle, tl!("Show in main window on / off")),
+        (tl!("Space-drag, middle-drag, Hand").into(), look),
+        (tl!("Arrow keys").into(), tl!("Look 2° (Shift 10°, Alt 0.5°)")),
+        (tl!("Home").into(), tl!("Look straight ahead")),
+        (tl!("Wheel, Ctrl + / Ctrl −").into(), zoom),
+        (tl!("Zoom tool drag").into(), tl!("Scrubby zoom (right zooms in)")),
+        (tl!("Zoom tool click").into(), tl!("Zoom in (Alt-click: out)")),
+        (tl!("Alt-click (Clone Stamp)").into(), tl!("Set the source direction")),
+    ];
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new(egui::RichText::new(tl!("Shortcuts")).size(11.5)).id_salt("spherical_shortcuts").default_open(true).show(ui, |ui| {
+        egui::Grid::new("spherical_shortcut_grid").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+            for (keys, what) in rows {
+                ui.label(egui::RichText::new(keys).size(11.0).color(t.text));
+                ui.label(egui::RichText::new(what).size(11.0).color(t.text_faint));
+                ui.end_row();
+            }
+        });
+    });
 }
 
 /// Bake Rotation: turn the active layer so the document shows what the rotated latlong shows,
