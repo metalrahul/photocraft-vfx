@@ -237,12 +237,29 @@ impl ViewProjection {
 
     /// View pixel position (x, y) → equirect pixel position in a `iw` × `ih` image.
     pub fn view_to_equirect(&self, x: f64, y: f64, iw: f64, ih: f64) -> [f64; 2] {
+        if let Some([ox, oy, pw, ph, shift]) = self.flat() {
+            // A latlong turned only about the vertical: a shift, no trigonometry.
+            return [(((x - ox) / pw + shift).rem_euclid(1.0) * iw).rem_euclid(iw), ((y - oy) / ph).clamp(0.0, 1.0) * ih];
+        }
         dir_to_equirect(self.view_to_dir(x, y), iw, ih)
     }
 
     /// Equirect pixel position → view pixel position (`None` behind the camera).
     pub fn equirect_to_view(&self, u: f64, v: f64, iw: f64, ih: f64) -> Option<[f64; 2]> {
+        if let Some([ox, oy, pw, ph, shift]) = self.flat() {
+            return Some([ox + (u / iw - shift).rem_euclid(1.0) * pw, oy + (v / ih).clamp(0.0, 1.0) * ph]);
+        }
         self.dir_to_view(equirect_to_dir(u, v, iw, ih))
+    }
+
+    /// A rotated latlong turned only by yaw (no pitch, no roll): its drawn panorama `[ox, oy,
+    /// pw, ph]` and the yaw as a fraction of a turn. The mapping is then a horizontal shift, so
+    /// the hot paths (a stroke's write-back on a 16K plate) skip the trigonometry.
+    fn flat(&self) -> Option<[f64; 5]> {
+        match self.mode {
+            Mode::Latlong { ox, oy, pw, ph, src: [yaw, pitch, roll, ..], .. } if pitch == 0.0 && roll == 0.0 => Some([ox, oy, pw, ph, yaw / 360.0]),
+            _ => None,
+        }
     }
 }
 
@@ -357,6 +374,23 @@ pub fn equirect_to_dir(u: f64, v: f64, iw: f64, ih: f64) -> [f64; 3] {
 /// the full width when it contains a pole), padded by `pad` pixels.
 pub fn view_rect_to_equirect(p: &ViewProjection, r: [f64; 4], iw: u32, ih: u32, pad: f64) -> Vec<[i64; 4]> {
     let (fw, fh) = (iw as f64, ih as f64);
+    if let Some([ox, oy, pw, ph, shift]) = p.flat() {
+        // A latlong turned only by yaw: the rect maps straight across (the poles are just its
+        // top and bottom rows here), split where it crosses the seam.
+        let v0 = ((((r[1] - oy) / ph).clamp(0.0, 1.0) * fh - pad).floor() as i64).max(0);
+        let v1 = ((((r[3] - oy) / ph).clamp(0.0, 1.0) * fh + pad).ceil() as i64).min(ih as i64);
+        let a = (((r[0] - ox) / pw + shift) * fw - pad).floor() as i64;
+        let b = (((r[2] - ox) / pw + shift) * fw + pad).ceil() as i64;
+        let w = iw as i64;
+        if v1 <= v0 {
+            return Vec::new();
+        }
+        if b - a >= w {
+            return vec![[0, v0, w, v1]];
+        }
+        let (a, b) = (a.rem_euclid(w), a.rem_euclid(w) + (b - a));
+        return if b <= w { vec![[a, v0, b, v1]] } else { vec![[a, v0, w, v1], [0, v0, b - w, v1]] };
+    }
     let n = 24;
     let mut us = Vec::with_capacity((n + 1) * (n + 1));
     let (mut vmin, mut vmax) = (f64::MAX, f64::MIN);
@@ -557,6 +591,29 @@ mod tests {
         // And a dab there touches both edges of the document.
         let rects = view_rect_to_equirect(&p, [1990.0, 990.0, 2010.0, 1010.0], 4000, 2000, 1.0);
         assert_eq!(rects.len(), 2, "{rects:?}");
+    }
+
+    #[test]
+    fn latlong_yaw_only_fast_path_matches_the_sphere() {
+        let (iw, ih) = (16384.0, 8192.0);
+        for yaw in [0.0, 37.5, -120.0, 180.0] {
+            let p = ViewProjection::latlong(yaw, 0.0, 0.0, 1600.0, 900.0, iw, ih, 0.3, 3000.0);
+            assert!(p.flat().is_some());
+            for &(x, y) in &[(800.0, 450.0), (3.0, 7.0), (1599.0, 899.0), (420.5, 13.25)] {
+                let fast = p.view_to_equirect(x, y, iw, ih);
+                let slow = dir_to_equirect(p.view_to_dir(x, y), iw, ih);
+                let du = (fast[0] - slow[0]).abs();
+                assert!(du.min(iw - du) < 1e-6 && close(fast[1], slow[1], 1e-6), "{yaw} ({x},{y}): {fast:?} vs {slow:?}");
+                let back = p.equirect_to_view(fast[0], fast[1], iw, ih).unwrap();
+                let sb = p.dir_to_view(equirect_to_dir(fast[0], fast[1], iw, ih)).unwrap();
+                assert!(close(back[0], sb[0], 1e-6) && close(back[1], sb[1], 1e-6), "{back:?} vs {sb:?}");
+            }
+            // A rect near the top stays its own columns, not the whole width.
+            let rects = view_rect_to_equirect(&p, [700.0, 40.0, 760.0, 80.0], iw as u32, ih as u32, 1.0);
+            let cols: i64 = rects.iter().map(|q| q[2] - q[0]).sum();
+            assert!(cols < 1000, "{rects:?}");
+        }
+        assert!(ViewProjection::latlong(10.0, 5.0, 0.0, 100.0, 100.0, 200.0, 100.0, 0.0, 50.0).flat().is_none());
     }
 
     #[test]

@@ -796,6 +796,16 @@ impl Live {
         if let (Some(t), Some(r)) = (&self.texture, self.shown) {
             let min = rect.min + vec2(r.x0 as f32, r.y0 as f32) / ppp;
             let at = Rect::from_min_size(min, vec2(r.width() as f32, r.height() as f32) / ppp);
+            // A rotated latlong: the stroke shows only on the panorama, not the margin around it.
+            let q = &self.params["projection"];
+            let g = |k: &str| q.get(k).and_then(serde_json::Value::as_f64).unwrap_or(1.0);
+            let clip = ViewProjection::from_json(q, g("width"), g("height"))
+                .latlong_rect()
+                .map(|[x, y, w, h]| Rect::from_min_size(rect.min + vec2(x as f32, y as f32) / ppp, vec2(w as f32, h as f32) / ppp).intersect(rect));
+            let painter = match clip {
+                Some(c) => painter.with_clip_rect(c.intersect(painter.clip_rect())),
+                None => painter.clone(),
+            };
             painter.image(t.id(), at, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
     }

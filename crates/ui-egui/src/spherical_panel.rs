@@ -58,11 +58,21 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         return;
     }
 
+    // Live Update off: a drag on the map or a slider changes a pending camera, drawn on the map,
+    // and the main window turns to it on release (no full redraw of a large panorama per step).
+    let ctx = ui.ctx().clone();
+    let pending_id = egui::Id::new(("pc-spherical-pending", idx));
+    let mut live = app.ui.tool_options.projection_live_update;
+    if widgets::checkbox(ui, &mut live, tl!("Live Update")).on_hover_text(tl!("Turn the main window while you drag; off, it turns when you release")).changed()
+    {
+        app.ui.tool_options.projection_live_update = live;
+    }
+    let Some(actual) = app.ui.views.get(idx).and_then(|v| v.projection) else { return };
+    let mut cam = if live { actual } else { ctx.data(|d| d.get_temp::<ProjectionView>(pending_id)).unwrap_or(actual) };
+
     // The latlong map: where the view looks; click or drag to point it, the wheel zooms.
     ui.add_space(4.0);
-    map(app, ui, idx);
-    let Some(mut cam) = app.ui.views.get(idx).and_then(|v| v.projection) else { return };
-    let before = cam;
+    map(app, ui, idx, &mut cam);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui.selectable_label(cam.latlong, tl!("Latlong")).clicked() {
@@ -99,11 +109,17 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             (cam.scale, cam.center_v) = (0.0, -1.0);
         }
     });
-    if cam != before
-        && let Some(v) = app.ui.views.get_mut(idx).and_then(|v| v.projection.as_mut())
-    {
-        *v = cam;
-        v.clamp_latlong();
+    if !live && ctx.input(|i| i.pointer.any_down()) && cam != actual {
+        // Still dragging: keep the change pending.
+        ctx.data_mut(|d| d.insert_temp(pending_id, cam));
+    } else {
+        ctx.data_mut(|d| d.remove_temp::<ProjectionView>(pending_id));
+        if cam != actual
+            && let Some(v) = app.ui.views.get_mut(idx).and_then(|v| v.projection.as_mut())
+        {
+            *v = cam;
+            v.clamp_latlong();
+        }
     }
 
     ui.add_space(6.0);
@@ -120,9 +136,9 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     shortcuts(app, ui, cam.latlong);
 }
 
-/// The document as a latlong with the view's outline, like the Navigator's preview; clicking or
-/// dragging points the view (`live_projection_misc::navigator`).
-fn map(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) {
+/// The document as a latlong with `cam`'s outline, like the Navigator's preview; clicking or
+/// dragging points `cam` (`live_projection_misc::navigator`).
+fn map(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, cam: &mut ProjectionView) {
     let t = Tokens::get(ui.ctx());
     let ctx = ui.ctx().clone();
     let Some(size) = app.session.documents().get(idx).map(|d| d.doc.size) else { return };
@@ -137,7 +153,7 @@ fn map(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) {
     {
         ui.painter().image(tex, rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
     }
-    crate::live_projection_misc::navigator(app, ui, &ctx, &resp, idx, rect, true);
+    crate::live_projection_misc::navigator(app, ui, &ctx, &resp, idx, rect, Some(cam));
     resp.on_hover_text(tl!("Click or drag to point the view; the wheel zooms"));
 }
 
