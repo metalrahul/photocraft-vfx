@@ -314,6 +314,28 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             }
         }
     }
+    // The Zoom tool and the temporary Zoom keys (⌘Space, ⌘⌥Space): a drag is a scrubby zoom
+    // (right zooms in, as on the flat canvas), a click steps in (⌥ or Zoom Out: out). Zoom is
+    // the field of view, or the rotated latlong's scale.
+    let held = crate::hold_keys::held_tool(app, &ctx);
+    if !looking && (tool == Tool::Zoom || matches!(held, Some(crate::hold_keys::Temporary::ZoomIn | crate::hold_keys::Temporary::ZoomOut))) {
+        let out = ctx.input(|i| i.modifiers.alt) || matches!(held, Some(crate::hold_keys::Temporary::ZoomOut));
+        let dx = response.drag_delta().x;
+        let f = if response.dragged() && app.ui.tool_options.zoom_scrubby && dx != 0.0 {
+            Some((dx * 0.01).exp())
+        } else if response.clicked() {
+            Some(if out { 1.0 / 1.5 } else { 1.5 })
+        } else {
+            None
+        };
+        if let Some(f) = f {
+            if cam.latlong {
+                cam.zoom_latlong(f64::from(f), fit);
+            } else {
+                cam.scale_fov(1.0 / f);
+            }
+        }
+    }
     // Keyboard look (arrows, Home) runs with the app's arrow keys: `move_mods::arrow_keys`.
     if response.dragged() && (looking || !paints) {
         if looking && cam.latlong {
