@@ -416,6 +416,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
 
     // GPU drawing.
     let doc = app.session.documents()[idx].doc.clone();
+    let tone = crate::canvas::hdr_preview(app, &doc);
+    ctx.data_mut(|d| d.insert_temp(tone_id(), tone));
     // What the view shows on the latlong: the GPU budget focuses there and a background
     // redraw (large documents, v0.10) finishes those blocks first.
     let seen = {
@@ -527,6 +529,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
                         rendered: 0,
                         last: 0.0,
                         cost: 0.0,
+                        tone: None,
                     }),
                     Err(e) => {
                         app.ui.status = e.to_string();
@@ -560,6 +563,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
                     rendered: 0,
                     last: 0.0,
                     cost: 0.0,
+                    tone: None,
                 }),
                 Err(e) => {
                     app.ui.status = e.to_string();
@@ -765,6 +769,15 @@ pub struct Live {
     shown: Option<photocraft_geom::Rect>,
     /// Points rendered into the texture.
     rendered: usize,
+    /// The 32-bit preview tone it was rendered through (`tone_id`).
+    tone: Option<[f32; 2]>,
+}
+
+/// Where the projection canvas keeps this frame's View › 32-bit Preview Options (exposure
+/// stops, gamma) for the stroke previews drawn over it: the canvas shader applies them to the
+/// document, so the CPU-rendered preview must too.
+fn tone_id() -> egui::Id {
+    egui::Id::new("pc-live-projection-tone")
 }
 
 impl Live {
@@ -784,13 +797,16 @@ impl Live {
         let floor: f64 = if matches!(self.preview, LivePreview::Tool(_)) { 0.05 } else { 0.0 };
         let wait = if self.cost > 0.04 { self.cost } else { 0.0 };
         let throttled = now - self.last < floor.max(wait);
-        if self.rendered != self.points.len() && !throttled {
+        // The exposure changed under the preview: render it again through the new one.
+        let tone = ctx.data(|d| d.get_temp::<Option<[f32; 2]>>(tone_id())).flatten();
+        if (self.rendered != self.points.len() || tone != self.tone) && !throttled {
             self.rendered = self.points.len();
+            self.tone = tone;
             self.last = now;
             let t0 = crate::gpu_canvas::now_ms();
             let o = match &mut self.preview {
-                LivePreview::Stroke(p) => p.render(&self.points),
-                LivePreview::Tool(t) => t.preview(&self.points),
+                LivePreview::Stroke(p) => p.render_toned(&self.points, tone),
+                LivePreview::Tool(t) => t.preview_toned(&self.points, tone),
             };
             self.cost = (crate::gpu_canvas::now_ms() - t0) / 1000.0;
             if let Some(o) = o {
@@ -987,6 +1003,7 @@ fn patch(
                             rendered: 0,
                             last: 0.0,
                             cost: 0.0,
+                            tone: None,
                         };
                         // Patch takes no points: render once now.
                         l.draw(ctx, painter, rect, ppp);
@@ -1067,6 +1084,7 @@ fn fill_tool(
                 rendered: 0,
                 last: 0.0,
                 cost: 0.0,
+                tone: None,
             }),
             Err(e) => {
                 app.ui.status = e.to_string();

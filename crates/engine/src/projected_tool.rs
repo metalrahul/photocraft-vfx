@@ -17,7 +17,7 @@ use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
-use crate::brush_cmds::projected::{PreviewOverlay, overlay, to_view, write_back};
+use crate::brush_cmds::projected::{PreviewOverlay, overlay_toned, to_view, write_back};
 use crate::equirect::{ViewProjection, rot_from_slice};
 use crate::{EngineError, Result, Session};
 
@@ -216,11 +216,16 @@ impl ProjectedTool {
 
     /// One live preview frame: what the stroke so far changes, as an overlay.
     pub fn preview(&mut self, points: &[[f64; 3]]) -> Option<PreviewOverlay> {
+        self.preview_toned(points, None)
+    }
+
+    /// [`Self::preview`] through the view's 32-bit preview `tone` (exposure stops, gamma).
+    pub fn preview_toned(&mut self, points: &[[f64; 3]], tone: Option<[f32; 2]>) -> Option<PreviewOverlay> {
         let (post, damage) = self.run(points).ok()?;
         if damage.is_empty() {
             return None;
         }
-        overlay(&self.pre, &post, damage)
+        overlay_toned(&self.pre, &post, damage, tone)
     }
 
     /// Whether the tool reads a source half (needs a source rotation).

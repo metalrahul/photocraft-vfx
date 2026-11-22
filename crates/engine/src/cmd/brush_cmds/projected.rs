@@ -260,6 +260,12 @@ impl ProjectedPreview {
     /// Render `points` (view pixels, `[x, y, pressure]`). `None` when nothing shows yet or the
     /// target isn't RGB/gray.
     pub fn render(&self, points: &[[f64; 3]]) -> Option<PreviewOverlay> {
+        self.render_toned(points, None)
+    }
+
+    /// [`Self::render`] shown through the view's 32-bit preview `tone` (exposure stops, gamma),
+    /// as the canvas shows the document under it.
+    pub fn render_toned(&self, points: &[[f64; 3]], tone: Option<[f32; 2]>) -> Option<PreviewOverlay> {
         let pts: Vec<photocraft_paint::StrokePoint> = points.iter().map(|q| photocraft_paint::StrokePoint::new(q[0], q[1], q[2] as f32)).collect();
         if pts.is_empty() {
             return None;
@@ -283,7 +289,7 @@ impl ProjectedPreview {
         if damage.is_empty() {
             return None;
         }
-        overlay(&self.pre, &post, damage)
+        overlay_toned(&self.pre, &post, damage, tone)
     }
 }
 
@@ -304,6 +310,14 @@ pub(crate) fn crop_cov(cov: &[f32], from: Rect, to: Rect) -> Vec<f32> {
 /// What the stroke changed over `r`, as an overlay: painted pixels as they now are (their own
 /// alpha), erased ones as a translucent grey veil by how much was removed, unchanged ones clear.
 pub(crate) fn overlay(pre: &Surface, post: &Surface, r: Rect) -> Option<PreviewOverlay> {
+    overlay_toned(pre, post, r, None)
+}
+
+/// [`overlay`] through View › 32-bit Preview Options `tone` (exposure in stops, gamma), applied
+/// to linear 32-bit values before they are encoded and clipped, as the GPU canvas applies it: a
+/// stroke on an exposed-down HDR panorama otherwise showed at the unexposed brightness (and any
+/// pixel a Screen or Add brush lifted slightly, at full brightness).
+pub(crate) fn overlay_toned(pre: &Surface, post: &Surface, r: Rect, tone: Option<[f32; 2]>) -> Option<PreviewOverlay> {
     use photocraft_color::{ColorMode, SampleType};
     let f = pre.format();
     let n = f.channels();
@@ -313,9 +327,16 @@ pub(crate) fn overlay(pre: &Surface, post: &Surface, r: Rect) -> Option<PreviewO
         _ => return None,
     };
     let linear = f.sample == SampleType::F32;
+    // Linear-light gain 2^exposure and 1 / gamma (the canvas shader's `hdr`); only 32-bit
+    // documents have the preview.
+    let (gain, inv_gamma) = match tone {
+        Some([e, g]) if linear && e.is_finite() && g.is_finite() && g > 0.0 => (2f32.powf(e.clamp(-20.0, 20.0)), 1.0 / g.max(0.01)),
+        _ => (1.0, 1.0),
+    };
     let (a, b) = (pre.read_region(r), post.read_region(r));
     let enc = |v: f32| -> u8 {
         let v = v.max(0.0);
+        let v = if gain != 1.0 || inv_gamma != 1.0 { (v * gain).powf(inv_gamma) } else { v };
         let v = if linear { if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.min(1.0).powf(1.0 / 2.4) - 0.055 } } else { v };
         (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
     };
@@ -558,6 +579,31 @@ mod tests {
         s.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
         assert_eq!(rgba(&s, other.0, other.1), second, "the other stroke is kept");
         assert!(rgba(&s, mine.0, mine.1)[3] > 0.5);
+    }
+
+    #[test]
+    fn the_overlay_shows_32_bit_values_through_the_view_exposure() {
+        use photocraft_color::{ColorMode, PixelFormat, SampleType};
+        let f = PixelFormat { mode: ColorMode::Rgb, sample: SampleType::F32, alpha: true };
+        let r = Rect::new(0, 0, 1, 1);
+        let mut pre = Surface::new(f);
+        pre.write_region(r, &[0.5, 0.5, 0.5, 1.0]);
+        let mut post = Surface::new(f);
+        // An HDR value a Screen brush lifted a little.
+        post.write_region(r, &[4.0, 0.52, 0.5, 1.0]);
+        let plain = overlay(&pre, &post, r).unwrap().px[0];
+        assert_eq!(plain[0], 255, "clipped without the preview");
+        // Three stops down: 4.0 → 0.5 linear (188 encoded), 0.52 → 0.065 (72).
+        let toned = overlay_toned(&pre, &post, r, Some([-3.0, 1.0])).unwrap().px[0];
+        assert!((i32::from(toned[0]) - 188).abs() <= 1, "{toned:?}");
+        assert!((i32::from(toned[1]) - 72).abs() <= 2, "{toned:?}");
+        assert_eq!(toned[3], 255);
+        // 8- and 16-bit documents have no 32-bit preview.
+        let f8 = PixelFormat { sample: SampleType::U8, ..f };
+        let (mut a, mut b) = (Surface::new(f8), Surface::new(f8));
+        a.write_region(r, &[0.5, 0.5, 0.5, 1.0]);
+        b.write_region(r, &[0.8, 0.5, 0.5, 1.0]);
+        assert_eq!(overlay_toned(&a, &b, r, Some([-3.0, 1.0])).unwrap().px, overlay(&a, &b, r).unwrap().px);
     }
 
     #[test]
