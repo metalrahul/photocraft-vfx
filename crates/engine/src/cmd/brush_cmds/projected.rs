@@ -107,26 +107,49 @@ pub(crate) fn write_back(
     ih: i32,
     selection: Option<&Surface>,
 ) -> Rect {
+    write_back_sloped(target, proj, pre, post, None, damage, iw, ih, selection)
+}
+
+/// [`write_back`] with the change's `slope` per view pixel and channel over `damage` (row-major,
+/// `d post / d pre − 1`, see [`stroke_slope`]): each target pixel moves by
+/// `(post − pre) + slope · (target − pre)`, so what a stroke covers is covered at the target's
+/// own resolution. Without it, the change is the same everywhere under a view pixel, and a view
+/// showing the target smaller than its pixels left their detail showing through opaque paint.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_back_sloped(
+    target: &mut Surface,
+    proj: &ViewProjection,
+    pre: &Surface,
+    post: &Surface,
+    slope: Option<&[f32]>,
+    damage: Rect,
+    iw: i32,
+    ih: i32,
+    selection: Option<&Surface>,
+) -> Rect {
     if damage.is_empty() {
         return Rect::EMPTY;
     }
     let n = target.channels();
     // The change once, in view space (bilinear is linear: sampling post − pre is sampling post
     // minus sampling pre); non-finite differences (inf/NaN pixels) change nothing.
+    let pre_px = pre.read_region(damage);
     let mut diff = post.read_region(damage);
-    for (d, p) in diff.iter_mut().zip(pre.read_region(damage)) {
+    for (d, p) in diff.iter_mut().zip(&pre_px) {
         *d -= p;
         if !d.is_finite() {
             *d = 0.0;
         }
     }
+    let slope = slope.filter(|s| s.len() == diff.len()).map(|s| s.iter().map(|v| if v.is_finite() { *v } else { 0.0 }).collect::<Vec<f32>>());
     // Which 8 × 8 view blocks changed at all: most of a long stroke's bounding box didn't.
     const B: i64 = 8;
     let (dw, dh) = (i64::from(damage.width()), i64::from(damage.height()));
     let (bw, bh) = ((dw + B - 1) / B, (dh + B - 1) / B);
     let mut blocks = vec![false; (bw * bh).max(0) as usize];
     for (i, px) in diff.chunks(n).enumerate() {
-        if px.iter().any(|v| *v != 0.0) {
+        let sloped = slope.as_ref().and_then(|s| s.get(i * n..(i + 1) * n)).is_some_and(|s| s.iter().any(|v| *v != 0.0));
+        if sloped || px.iter().any(|v| *v != 0.0) {
             let (x, y) = (i as i64 % dw, i as i64 / dw);
             blocks[((y / B) * bw + x / B) as usize] = true;
         }
@@ -167,7 +190,7 @@ pub(crate) fn write_back(
             .enumerate()
             .map(|(j, line)| {
                 let y = rect.y0 + j as i32;
-                let mut b = vec![0f32; n];
+                let (mut b, mut sb, mut pb) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
                 let mut touched = false;
                 for (i, x) in (rect.x0..rect.x1).enumerate() {
                     let Some([vx, vy]) = proj.equirect_to_view(f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(iw), f64::from(ih)) else { continue };
@@ -182,8 +205,14 @@ pub(crate) fn write_back(
                         continue;
                     }
                     sample_buf(&diff, damage, n, vx, vy, &mut b);
+                    if let Some(s) = &slope {
+                        sample_buf(s, damage, n, vx, vy, &mut sb);
+                        sample_buf(&pre_px, damage, n, vx, vy, &mut pb);
+                    }
                     for c in 0..n {
-                        let d = b[c] * k;
+                        // The target's own detail against the view's: what the stroke keeps of it.
+                        let detail = if slope.is_some() { sb[c] * (line[i * n + c] - pb[c]) } else { 0.0 };
+                        let d = (b[c] + if detail.is_finite() { detail } else { 0.0 }) * k;
                         if d != 0.0 && d.is_finite() {
                             touched = true;
                             let v = line[i * n + c] + d;
@@ -417,12 +446,42 @@ fn project_stroke(
         return Rect::EMPTY;
     }
     let pre = to_view(surf, proj, work, iw, ih);
+    // The stroke once (its coverage), composited over the view and over a nudged copy of it:
+    // how much of what is under it the stroke keeps (`stroke_slope`).
+    let mut r = photocraft_paint::StrokeRenderer::new(brush, Some(pre.format()), 1.0);
+    r.push(pts);
+    r.finish();
     let mut post = pre.clone();
-    let damage = photocraft_paint::render_stroke(&mut post, brush, pts, None, lock, 1.0).intersect(&work);
+    let damage = r.composite(&pre, &mut post, None, lock, true).intersect(&work);
     if damage.is_empty() {
         return Rect::EMPTY;
     }
-    write_back(surf, proj, &pre, &post, damage, iw, ih, selection)
+    let slope = stroke_slope(&mut r, &pre, &post, damage, lock);
+    write_back_sloped(surf, proj, &pre, &post, Some(&slope), damage, iw, ih, selection)
+}
+
+/// `d post / d pre − 1` per view pixel and channel over `damage`: the stroke composited again
+/// over `pre` nudged by a step (down from bright values, up from dark ones), so the target's
+/// detail under the stroke is kept as the stroke keeps the view's: none under opaque Normal
+/// paint, all of it outside the stroke. Exact for the blend modes that are linear in what is
+/// under them (Normal, the Eraser, Screen, Multiply, Add...), to first order for the rest.
+fn stroke_slope(r: &mut photocraft_paint::StrokeRenderer, pre: &Surface, post: &Surface, damage: Rect, lock: bool) -> Vec<f32> {
+    let step = if pre.format().sample == photocraft_color::SampleType::U8 { 0.25 } else { 1.0 / 64.0 };
+    let base = pre.read_region(damage);
+    let mut nudged = pre.clone();
+    nudged.write_region(damage, &base.iter().map(|v| if *v > 0.5 { v - step } else { v + step }).collect::<Vec<f32>>());
+    // The nudge as stored (8- and 16-bit values round).
+    let moved = nudged.read_region(damage);
+    let mut after = nudged.clone();
+    r.composite(&nudged, &mut after, None, lock, true);
+    let (a, b) = (post.read_region(damage), after.read_region(damage));
+    (0..base.len())
+        .map(|i| {
+            let dx = moved[i] - base[i];
+            let k = if dx.abs() > 1e-6 { (b[i] - a[i]) / dx } else { 1.0 };
+            if k.is_finite() { (k - 1.0).clamp(-1.0, 0.0) } else { 0.0 }
+        })
+        .collect()
 }
 
 /// The write a [`ProjectedStrokeJob`] runs on the target's pixels: returns what it changed.
@@ -588,6 +647,41 @@ mod tests {
         s.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
         assert_eq!(rgba(&s, other.0, other.1), second, "the other stroke is kept");
         assert!(rgba(&s, mine.0, mine.1)[3] > 0.5);
+    }
+
+    #[test]
+    fn an_opaque_stroke_in_a_zoomed_out_view_covers_the_detail_under_it() {
+        // A one-pixel checker on an opaque layer, painted at a quarter size: the old detail must
+        // not show through the brush colour (it did, as speckle, on a background layer).
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 720, "height": 360, "background": "white"})).unwrap();
+        let id = s.active().unwrap().active_layer.unwrap();
+        s.edit("checker", |doc, _| {
+            let surf = doc.layer_mut(id).unwrap().surface_mut().unwrap();
+            let n = surf.channels();
+            let mut d = vec![1f32; 720 * 360 * n];
+            for y in 0..360 {
+                for x in 0..720 {
+                    if (x + y) % 2 == 0 {
+                        d[(y * 720 + x) * n..][..3].fill(0.0);
+                    }
+                }
+            }
+            surf.write_region(Rect::new(0, 0, 720, 360), &d);
+            Ok(())
+        })
+        .unwrap();
+        let view = json!({"kind": "latlong", "yaw": 0.0, "scale": 0.25, "centerY": 180.0, "docWidth": 720, "docHeight": 360, "width": 180, "height": 90});
+        let p = json!({"points": [[80.0, 45.0], [100.0, 45.0]], "size": 12, "hardness": 100, "color": "#804020", "projection": view});
+        s.execute("paint.projectedStroke", p).unwrap();
+        // Doc (360, 180) is view (90, 45): the middle of the stroke.
+        for (x, y) in [(360, 180), (361, 180), (360, 181), (350, 178)] {
+            let c = rgba(&s, x, y);
+            assert!((c[0] - 0.502).abs() < 0.02 && (c[1] - 0.251).abs() < 0.02 && (c[2] - 0.125).abs() < 0.02, "({x}, {y}): {c:?}");
+        }
+        // Outside the stroke the checker is untouched.
+        assert_eq!(rgba(&s, 360, 40)[0], 0.0);
+        assert_eq!(rgba(&s, 361, 40)[0], 1.0);
     }
 
     #[test]
