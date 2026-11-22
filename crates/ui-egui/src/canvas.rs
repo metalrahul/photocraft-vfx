@@ -2439,6 +2439,14 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // View › Equirectangular Live Projection draws and handles input on its own.
     if view.projection.is_some() {
         view.doc_size = size;
+        // Pen pressure, tilt and the eraser end for this frame, as below for the flat canvas:
+        // without it a projection stroke read whatever the pen last reported on the flat
+        // canvas (often a lifted pen's zero, which painted nothing).
+        app.stylus.use_pressure = app.session.prefs().tools.use_tablet_pressure;
+        let curve = app.session.prefs().tools.pressure_curve.clone();
+        app.stylus.set_pressure_curve(&curve);
+        app.stylus.update_for_frame(ui.ctx().cumulative_frame_nr(), &ui.input(|i| i.events.clone()));
+        crate::stylus::Stylus::sync_eraser_tool(app);
         let view = crate::live_projection::canvas(app, ui, idx, rect, view, ppp, output);
         // The canvas popups the flat canvas draws at its end (its tool context menu, the layer
         // picker) are drawn here too, or a right-click opens one that never shows.

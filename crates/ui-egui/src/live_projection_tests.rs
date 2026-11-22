@@ -1055,3 +1055,15 @@ fn a_released_brush_stroke_is_written_in_the_background_and_lands_once() {
     assert_eq!(strokes.len(), 1, "one stroke, landed once");
     assert!(non_finite(&h) <= 8);
 }
+
+#[test]
+fn the_pen_pressure_is_read_in_the_projection_view() {
+    // The projection canvas returns before the flat canvas reads the pen: without its own read a
+    // stroke used whatever the pen last reported there (a lifted pen's 0 painted nothing).
+    let mut h = ed_harness(Tool::Brush);
+    let c = h.state().last_canvas_rect.center();
+    h.event(Event::Touch { device_id: egui::TouchDeviceId(1), id: egui::TouchId(1), phase: egui::TouchPhase::Start, pos: c, force: Some(0.42) });
+    h.run_steps(1);
+    let p = h.state().stylus.pressure();
+    assert!((p - 0.42).abs() < 0.01, "{p}");
+}
