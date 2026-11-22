@@ -1,4 +1,4 @@
-//! A released projected Brush or Eraser stroke is written on a worker thread
+//! A released projected Brush, Eraser or Clone Stamp stroke is written on a worker thread
 //! (`ProjectedStrokeJob`) instead of in the frame of the release: writing a big stroke back into
 //! a 16K latlong took 0.1–1 s, and the canvas froze for it. Meanwhile its live preview keeps
 //! showing; when the write is done it is offered to `paint.projectedStroke`, which takes the
@@ -28,13 +28,18 @@ pub struct Pending {
     rx: Receiver<Option<Done>>,
 }
 
-/// Start writing finished stroke `l` (a `paint.projectedStroke`, points in its params) in the
+/// Start writing finished stroke `l` (a `paint.projectedStroke` or `paint.projectedClone`,
+/// points in its params) in the
 /// background. Gives it back when it can't (the caller then runs the command as before).
 pub(super) fn start(app: &mut PhotocraftApp, l: Live, scale: f32, view: u64) -> Result<(), Live> {
     // One at a time, in order: an earlier stroke lands before this one is prepared on top.
     finish(app, true);
     let Some(doc) = app.session.active().map(|st| st.doc.id) else { return Err(l) };
-    let job = match with_brush_scale(app, scale, |app| ProjectedStrokeJob::prepare(&app.session, &l.params)) {
+    let prepare = |app: &mut PhotocraftApp| match l.cmd {
+        "paint.projectedClone" => photocraft_engine::retouch_cmds::projected_clone_job(&app.session, &l.params),
+        _ => ProjectedStrokeJob::prepare(&app.session, &l.params),
+    };
+    let job = match with_brush_scale(app, scale, prepare) {
         Ok(job) => job,
         Err(_) => return Err(l),
     };
@@ -42,12 +47,15 @@ pub(super) fn start(app: &mut PhotocraftApp, l: Live, scale: f32, view: u64) -> 
     let spawned = std::thread::Builder::new()
         .name("pc-projected-commit".into())
         .spawn(move || {
-            let (done, before, bounds) = job.run();
+            // A failed write (or a thread that dies: the channel closes) leaves the command to
+            // paint the stroke itself, and report why.
+            let done = job.run();
             // The changed tiles are converted to the canvas's texels here too, so the frame
-            // that lands the stroke only uploads them. (Should the thread die, the channel
-            // closes and the command paints the stroke itself.)
-            photocraft_gpu::preconvert(done.surface(), bounds, Some(&before));
-            let _ = tx.send(Some((done, before, bounds)));
+            // that lands the stroke only uploads them.
+            if let Some((done, before, bounds)) = &done {
+                photocraft_gpu::preconvert(done.surface(), *bounds, Some(before));
+            }
+            let _ = tx.send(done);
         })
         .is_ok();
     if !spawned {

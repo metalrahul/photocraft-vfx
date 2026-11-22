@@ -601,13 +601,22 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             l.draw(&ctx, &painter, rect, ppp);
             ctx.request_repaint();
         }
-        // A Brush or Eraser stroke is written on a worker thread (`live_projection_commit`):
+        // A Brush, Eraser or Clone Stamp stroke is written on a worker thread (`live_projection_commit`):
         // its preview stays until it lands. Other tools commit here.
         let finished = finished.and_then(|mut l| {
             // Keep showing the stroke on the frame it is committed.
             l.draw(&ctx, &painter, rect, ppp);
             l.params["points"] = json!(l.points);
-            if l.cmd == "paint.projectedStroke" { commit::start(app, l, brush_scale, vp.key()).err() } else { Some(l) }
+            if !matches!(l.cmd, "paint.projectedStroke" | "paint.projectedClone") {
+                return Some(l);
+            }
+            let rotation = l.rotation;
+            let back = commit::start(app, l, brush_scale, vp.key()).err();
+            if back.is_none() && cloning {
+                // Aligned: the next stroke keeps this one's source offset.
+                cam.clone_rotation = rotation.filter(|_| app.ui.tool_options.clone_aligned).map(|q| flat(&q));
+            }
+            back
         });
         if let Some(l) = finished {
             let cmd = l.cmd;

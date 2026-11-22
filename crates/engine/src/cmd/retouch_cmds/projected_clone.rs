@@ -18,7 +18,18 @@ use crate::{Result, Session};
 
 const CMD: &str = "paint.projectedClone";
 
-pub(super) fn projected_clone(s: &mut Session, p: &Value) -> Result<Value> {
+/// What a `paint.projectedClone` needs from its params: the view, the source view, the stroke,
+/// its layer, which layers it samples and the blend mode.
+struct Parsed {
+    proj: ViewProjection,
+    src_proj: ViewProjection,
+    stroke: photocraft_paint::Stroke,
+    id: Option<photocraft_doc::LayerId>,
+    which: SampleLayers,
+    mode: photocraft_color::BlendMode,
+}
+
+fn parse(s: &Session, p: &Value) -> Result<Parsed> {
     let q = p.get("projection").ok_or_else(|| bad(CMD, "missing `projection`"))?;
     let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
     let (w, h) = (g("width", 0.0), g("height", 0.0));
@@ -32,45 +43,79 @@ pub(super) fn projected_clone(s: &mut Session, p: &Value) -> Result<Value> {
     let (stroke, id) = parse_brush(s, p, CMD)?;
     let which = sample_layers(p, CMD)?;
     let mode = blend_param(p, CMD)?;
-    let dmg = run_stroke(s, "Clone Stamp", id, p, |pre, surf, sel, lock| {
-        let (iw, ih) = (pre.size.width as i32, pre.size.height as i32);
-        if iw < 2 || ih < 1 {
-            return Err(bad(CMD, "document too small for a projected stroke"));
+    Ok(Parsed { proj, src_proj, stroke, id, which, mode })
+}
+
+pub(super) fn projected_clone(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = parse(s, p)?;
+    // The stroke as the canvas already wrote it on a worker thread, for exactly these params
+    // and this document (`clone_job`): its pixels, instead of cloning again.
+    let live = s.live_commit.take().filter(|l| l.matches(s, CMD, p, &c.stroke.points));
+    let dmg = run_stroke(s, "Clone Stamp", c.id, p, |pre, surf, sel, lock| {
+        if let Some(l) = live {
+            *surf = l.surface;
+            return Ok(l.bounds);
         }
-        let (bounds, cov) = stroke_coverage(&stroke);
-        let view = Rect::new(0, 0, w as i32, h as i32);
-        let work = bounds.intersect(&view);
-        if work.is_empty() {
-            return Ok(Rect::EMPTY);
-        }
-        // Coverage only over the part of the stroke inside the view.
-        let cov = crop(&cov, bounds, work);
-        let pre_view = to_view(surf, &proj, work, iw, ih);
-        let source = match which {
-            SampleLayers::Current => to_view(surf, &src_proj, work, iw, ih),
-            _ => {
-                // The composite only where the rotated view looks.
-                let fmt = surf.format();
-                let mut flat = Surface::new(fmt);
-                let r = [f64::from(work.x0), f64::from(work.y0), f64::from(work.x1), f64::from(work.y1)];
-                for e in view_rect_to_equirect(&src_proj, r, iw as u32, ih as u32, 2.0) {
-                    let rect = Rect::new(e[0] as i32, e[1] as i32, e[2] as i32, e[3] as i32);
-                    if !rect.is_empty() {
-                        flat.write_region(rect, &composite_region(pre, id, which, rect, fmt).data);
-                    }
-                }
-                to_view(&flat, &src_proj, work, iw, ih)
-            }
-        };
-        let paint = Region::read(&source, work);
-        let mut post = pre_view.clone();
-        let damage = apply_coverage(&mut post, work, &cov, stroke.brush.opacity, None, lock, &paint, mode).intersect(&work);
-        if damage.is_empty() {
-            return Ok(Rect::EMPTY);
-        }
-        Ok(write_back(surf, &proj, &pre_view, &post, damage, iw, ih, sel))
+        clone_into(&c, pre, surf, sel, lock)
     })?;
     Ok(json!({ "damage": damage_json(dmg) }))
+}
+
+/// A released `paint.projectedClone` (params `p`, with its points) to write on a worker thread
+/// while the canvas carries on; its result is offered back to the command.
+pub fn clone_job(s: &Session, p: &Value) -> Result<crate::brush_cmds::ProjectedStrokeJob> {
+    let c = parse(s, p)?;
+    let st = s.active().ok_or(crate::EngineError::NoDocument)?;
+    let pre = (*st.doc).clone();
+    let mut doc = pre.clone();
+    let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, c.id, p)?;
+    let surface = surf.clone();
+    let points = c.stroke.points.clone();
+    let write = Box::new(move |surf: &mut Surface| clone_into(&c, &pre, surf, pre.selection.as_ref(), lock));
+    crate::brush_cmds::ProjectedStrokeJob::new(s, CMD, p, points, surface, write)
+}
+
+/// Clone stroke `c` onto `surf` (the target in document `pre`), clipped by `sel`.
+fn clone_into(c: &Parsed, pre: &photocraft_doc::Document, surf: &mut Surface, sel: Option<&Surface>, lock: bool) -> Result<Rect> {
+    let Parsed { proj, src_proj, stroke, id, which, mode } = c;
+    let (proj, src_proj, which, id, mode) = (*proj, *src_proj, *which, *id, *mode);
+    let (w, h) = (proj.w, proj.h);
+    let (iw, ih) = (pre.size.width as i32, pre.size.height as i32);
+    if iw < 2 || ih < 1 {
+        return Err(bad(CMD, "document too small for a projected stroke"));
+    }
+    let (bounds, cov) = stroke_coverage(stroke);
+    let view = Rect::new(0, 0, w as i32, h as i32);
+    let work = bounds.intersect(&view);
+    if work.is_empty() {
+        return Ok(Rect::EMPTY);
+    }
+    // Coverage only over the part of the stroke inside the view.
+    let cov = crop(&cov, bounds, work);
+    let pre_view = to_view(surf, &proj, work, iw, ih);
+    let source = match which {
+        SampleLayers::Current => to_view(surf, &src_proj, work, iw, ih),
+        _ => {
+            // The composite only where the rotated view looks.
+            let fmt = surf.format();
+            let mut flat = Surface::new(fmt);
+            let r = [f64::from(work.x0), f64::from(work.y0), f64::from(work.x1), f64::from(work.y1)];
+            for e in view_rect_to_equirect(&src_proj, r, iw as u32, ih as u32, 2.0) {
+                let rect = Rect::new(e[0] as i32, e[1] as i32, e[2] as i32, e[3] as i32);
+                if !rect.is_empty() {
+                    flat.write_region(rect, &composite_region(pre, id, which, rect, fmt).data);
+                }
+            }
+            to_view(&flat, &src_proj, work, iw, ih)
+        }
+    };
+    let paint = Region::read(&source, work);
+    let mut post = pre_view.clone();
+    let damage = apply_coverage(&mut post, work, &cov, stroke.brush.opacity, None, lock, &paint, mode).intersect(&work);
+    if damage.is_empty() {
+        return Ok(Rect::EMPTY);
+    }
+    Ok(write_back(surf, &proj, &pre_view, &post, damage, iw, ih, sel))
 }
 
 /// A live Clone Stamp preview from `paint.projectedClone` params (points unused): the target
@@ -101,20 +146,42 @@ pub fn projected_clone_preview(s: &Session, p: &Value) -> Result<crate::brush_cm
     let source = match which {
         SampleLayers::Current => to_view(surf, &src_proj, view, iw, ih),
         _ => {
+            // The composite of what the rotated view looks at. A zoomed-out view shows the
+            // panorama at a fraction of its pixels: composite a proxy reduced to about the
+            // view's resolution, not the full document (a whole 16K latlong took about 2 s at
+            // the click). The commit composites at full size where the stroke is.
+            let k = preview_reduction(&proj, f64::from(iw));
+            let proxy = (k > 1 && photocraft_compose::proxy::proxy_faithful(&pre)).then(|| photocraft_compose::proxy::proxy_document(&pre, k));
+            let from = proxy.as_ref().unwrap_or(&pre);
+            let (pw, ph) = (from.size.width as i32, from.size.height as i32);
             let fmt = surf.format();
             let mut flat = Surface::new(fmt);
-            for e in view_rect_to_equirect(&src_proj, [0.0, 0.0, w, h], iw as u32, ih as u32, 2.0) {
+            for e in view_rect_to_equirect(&src_proj, [0.0, 0.0, w, h], pw as u32, ph as u32, 2.0) {
                 let rect = Rect::new(e[0] as i32, e[1] as i32, e[2] as i32, e[3] as i32);
                 if !rect.is_empty() {
-                    flat.write_region(rect, &composite_region(&pre, id, which, rect, fmt).data);
+                    flat.write_region(rect, &composite_region(from, id, which, rect, fmt).data);
                 }
             }
-            to_view(&flat, &src_proj, view, iw, ih)
+            to_view(&flat, &src_proj, view, pw, ph)
         }
     };
     let pre_view = to_view(surf, &proj, view, iw, ih);
     let sel = pre.selection.as_ref().map(|m| to_view(m, &proj, view, iw, ih));
     Ok(ProjectedPreview::with(pre_view, view, sel, PreviewKind::Clone { source, brush: Box::new(stroke.brush), mode, lock }))
+}
+
+/// The power-of-two factor a document `iw` pixels wide can be reduced by and still have about a
+/// pixel per pixel of view `proj` (at its centre, for the perspective camera).
+fn preview_reduction(proj: &ViewProjection, iw: f64) -> u32 {
+    let per_view_px = match proj.latlong_rect() {
+        Some([_, _, pw, _]) => iw / pw.max(1.0),
+        None => (proj.cam.fov.to_radians() / 2.0).tan() / (proj.h / 2.0).max(1.0) * iw / std::f64::consts::TAU,
+    };
+    let mut k = 1u32;
+    while f64::from(k * 2) <= per_view_px && k < 64 {
+        k *= 2;
+    }
+    k
 }
 
 /// `cov` (row-major over `from`) cut to `to` (inside `from`).
@@ -135,6 +202,19 @@ fn crop(cov: &[f32], from: Rect, to: Rect) -> Vec<f32> {
 mod tests {
     use super::*;
     use crate::equirect::{Camera, rot, rotation_between};
+
+    #[test]
+    fn the_preview_composites_at_about_the_views_resolution() {
+        // A 16K latlong fitted into a 2000 px view: 8 document pixels per view pixel.
+        let fit = ViewProjection::latlong(0.0, 0.0, 0.0, 2000.0, 1200.0, 16384.0, 8192.0, 2000.0 / 16384.0, 4096.0);
+        assert_eq!(preview_reduction(&fit, 16384.0), 8);
+        // Zoomed in to 1:1: nothing to reduce.
+        let close = ViewProjection::latlong(0.0, 0.0, 0.0, 2000.0, 1200.0, 16384.0, 8192.0, 1.0, 4096.0);
+        assert_eq!(preview_reduction(&close, 16384.0), 1);
+        // A 90° perspective view 1000 px tall of a 16K latlong: about 5 px each, so 4.
+        let persp = ViewProjection::new(Camera { yaw: 0.0, pitch: 0.0, fov: 90.0 }, 1600.0, 1000.0);
+        assert_eq!(preview_reduction(&persp, 16384.0), 4);
+    }
 
     fn rgba(s: &Session, x: i32, y: i32) -> [f32; 4] {
         let d = s.active().unwrap();
@@ -177,6 +257,35 @@ mod tests {
         // One History step.
         s.execute("edit.undo", json!({})).unwrap();
         assert_eq!(rgba(&s, 1, 180)[3], 0.0);
+    }
+
+    #[test]
+    fn a_clone_written_on_a_worker_thread_lands_as_the_command_would_paint_it() {
+        let setup = || {
+            let mut s = doc();
+            s.execute("select.rect", json!({"x": 340, "y": 160, "width": 40, "height": 40})).unwrap();
+            s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+            s.execute("select.deselect", json!({})).unwrap();
+            s
+        };
+        let p = ViewProjection::new(Camera { yaw: 180.0, pitch: 0.0, fov: 90.0 }, 400.0, 300.0);
+        let q = rotation_between(p.view_to_dir(200.0, 150.0), crate::equirect::equirect_to_dir(360.0, 180.0, 720.0, 360.0));
+        let params = json!({"points": [[200.0, 150.0]], "size": 30, "hardness": 100, "rotation": q.concat(), "sampleLayer": "all", "projection": view(180.0)});
+        let mut direct = setup();
+        direct.execute(CMD, params.clone()).unwrap();
+        let mut s = setup();
+        let job = clone_job(&s, &params).unwrap();
+        let (done, _, bounds) = std::thread::spawn(move || job.run()).join().unwrap().unwrap();
+        assert!(!bounds.is_empty());
+        s.offer_projected_stroke(done);
+        s.execute(CMD, params).unwrap();
+        assert!(s.live_commit.is_none(), "the offer is used up");
+        for x in [1, 718, 200, 360] {
+            assert_eq!(rgba(&s, x, 180), rgba(&direct, x, 180), "x {x}");
+        }
+        assert!(rgba(&s, 1, 180)[0] > 0.9);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(rgba(&s, 1, 180)[3], 0.0, "one History step");
     }
 
     #[test]

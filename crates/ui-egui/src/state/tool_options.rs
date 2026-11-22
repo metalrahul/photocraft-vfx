@@ -8,9 +8,6 @@ pub struct ToolOptions {
     /// Equirectangular Live Projection: the brush Size is in document (equirect) pixels at the
     /// view centre rather than view pixels, so a stroke covers the same image area at any field of view.
     pub projection_brush_doc_px: bool,
-    /// Window › Spherical: the main window turns while a panel control is dragged (on), or when
-    /// it is released (off, the default: a large panorama is not redrawn at every step).
-    pub projection_live_update: bool,
     /// View › Float Display for Large Documents (`gpu_canvas::set_float_large`).
     pub float_display_large: bool,
     pub tolerance: f32,
@@ -489,7 +486,6 @@ impl Default for ToolOptions {
     fn default() -> Self {
         Self {
             projection_brush_doc_px: false,
-            projection_live_update: false,
             float_display_large: false,
             tolerance: 32.0,
             contiguous: true,

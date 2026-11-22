@@ -425,17 +425,17 @@ fn project_stroke(
     write_back(surf, proj, &pre, &post, damage, iw, ih, selection)
 }
 
-/// A released `paint.projectedStroke`, ready to be written on a worker thread
-/// ([`ProjectedStrokeJob::run`]) while the canvas carries on: the brush, the target's pixels and
-/// the selection as they were when it was prepared. Its result is offered to the command
-/// ([`Session::offer_projected_stroke`]), which takes it when nothing changed meanwhile.
+/// The write a [`ProjectedStrokeJob`] runs on the target's pixels: returns what it changed.
+pub(crate) type Write = Box<dyn FnOnce(&mut Surface) -> Result<Rect> + Send>;
+
+/// A released projected stroke (`paint.projectedStroke` or `paint.projectedClone`), ready to be
+/// written on a worker thread ([`ProjectedStrokeJob::run`]) while the canvas carries on: the
+/// brush, the target's pixels and the selection as they were when it was prepared. Its result
+/// is offered to the command ([`Session::offer_projected_stroke`]), which takes it when nothing
+/// changed meanwhile.
 pub struct ProjectedStrokeJob {
     commit: super::LiveCommit,
-    proj: ViewProjection,
-    brush: photocraft_paint::BrushSettings,
-    lock: bool,
-    selection: Option<Surface>,
-    size: (i32, i32),
+    write: Write,
 }
 
 /// A finished [`ProjectedStrokeJob`]: the target's new pixels.
@@ -461,38 +461,47 @@ impl ProjectedStrokeJob {
         let bg = s.tools.background;
         let (id, mut brush, _) = stroke_target(s, p, brush)?;
         let st = s.active().ok_or(EngineError::NoDocument)?;
-        let base = (st.doc.id, st.revision);
-        let base_doc = std::sync::Arc::downgrade(&st.doc);
         let mut doc = (*st.doc).clone();
-        let size = (doc.size.width as i32, doc.size.height as i32);
-        if size.0 < 2 || size.1 < 1 {
+        let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
+        if iw < 2 || ih < 1 {
             return Err(EngineError::Other("document too small for a projected stroke".into()));
         }
         let selection = doc.selection.clone();
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
         erase_locked(&mut brush, lock, bg);
+        let surface = surf.clone();
+        let pts = points.clone();
+        let write: Write = Box::new(move |surf| Ok(project_stroke(surf, &proj, &pts, &brush, lock, selection.as_ref(), iw, ih)));
+        Self::new(s, "paint.projectedStroke", p, points, surface, write)
+    }
+
+    /// A job for command `cmd` with params `p` (its `points` parsed as `points`) that runs
+    /// `write` on `surface`, the target's pixels in the active document now.
+    pub(crate) fn new(s: &Session, cmd: &str, p: &Value, points: Vec<photocraft_paint::StrokePoint>, surface: Surface, write: Write) -> Result<Self> {
+        let st = s.active().ok_or(EngineError::NoDocument)?;
         let commit = super::LiveCommit {
             mixer: None,
-            cmd: "paint.projectedStroke".into(),
-            base,
-            base_doc,
+            cmd: cmd.into(),
+            base: (st.doc.id, st.revision),
+            base_doc: std::sync::Arc::downgrade(&st.doc),
             params: p.clone(),
             seed: p.get("seed").and_then(Value::as_u64),
             points,
-            surface: surf.clone(),
+            surface,
             bounds: Rect::EMPTY,
         };
-        Ok(Self { commit, proj, brush, lock, selection, size })
+        Ok(Self { commit, write })
     }
 
     /// Write the stroke (the heavy part: any thread). Also returns the pixels before it and the
-    /// changed rectangle, for the caller to prepare its upload.
-    pub fn run(self) -> (ProjectedCommit, Surface, Rect) {
-        let Self { mut commit, proj, brush, lock, selection, size } = self;
+    /// changed rectangle, for the caller to prepare its upload. `None` when the write failed (the
+    /// command then reports why).
+    pub fn run(self) -> Option<(ProjectedCommit, Surface, Rect)> {
+        let Self { mut commit, write } = self;
         let before = commit.surface.clone();
-        commit.bounds = project_stroke(&mut commit.surface, &proj, &commit.points, &brush, lock, selection.as_ref(), size.0, size.1);
+        commit.bounds = write(&mut commit.surface).ok()?;
         let bounds = commit.bounds;
-        (ProjectedCommit(commit), before, bounds)
+        Some((ProjectedCommit(commit), before, bounds))
     }
 }
 
@@ -551,7 +560,7 @@ mod tests {
         direct.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
         let mut s = new();
         let job = ProjectedStrokeJob::prepare(&s, &red_dab(150.0)).unwrap();
-        let (done, _, bounds) = std::thread::spawn(move || job.run()).join().unwrap();
+        let (done, _, bounds) = std::thread::spawn(move || job.run()).join().unwrap().unwrap();
         assert!(!bounds.is_empty());
         s.offer_projected_stroke(done);
         s.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
@@ -575,7 +584,7 @@ mod tests {
         let (other, mine) = (under(320.0, 155.0), under(170.0, 155.0));
         let second = rgba(&s, other.0, other.1);
         assert!(second[3] > 0.5, "{second:?}");
-        s.offer_projected_stroke(job.run().0);
+        s.offer_projected_stroke(job.run().unwrap().0);
         s.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
         assert_eq!(rgba(&s, other.0, other.1), second, "the other stroke is kept");
         assert!(rgba(&s, mine.0, mine.1)[3] > 0.5);

@@ -1000,7 +1000,7 @@ fn navigator_frustum_outlines_the_view_and_splits_at_the_seam() {
 
 #[test]
 fn spherical_map_outlines_a_pending_camera_without_turning_the_view() {
-    // Live Update off: the Spherical panel's map shows where the view will look on release.
+    // The Spherical panel's map shows where the view will look on release.
     let h = ed_harness(Tool::Hand);
     let nav = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(400.0, 200.0));
     let mut cam = h.state().ui.views[0].projection.unwrap();
@@ -1011,7 +1011,6 @@ fn spherical_map_outlines_a_pending_camera_without_turning_the_view() {
     let mid = |l: &[Vec<egui::Pos2>]| l[0].iter().map(|p| p.x).sum::<f32>() / l[0].len() as f32;
     assert!(mid(&pending) > mid(&now) + 60.0, "{} vs {}", mid(&pending), mid(&now));
     assert_eq!(crate::live_projection_misc::frustum(h.state(), 0, nav), now, "the view itself is unchanged");
-    assert!(!h.state().ui.tool_options.projection_live_update, "off by default");
 }
 
 #[test]

@@ -58,12 +58,11 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         return;
     };
 
-    // Live Update off: a drag on the map or a slider changes a pending camera, drawn on the map,
-    // and the main window turns to it on release (no full redraw of a large panorama per step).
+    // A drag on the map or a slider changes a pending camera, drawn on the map, and the main
+    // window turns to it on release (no full redraw of a large panorama per step).
     let ctx = ui.ctx().clone();
     let pending_id = egui::Id::new(("pc-spherical-pending", idx));
-    let live = app.ui.tool_options.projection_live_update;
-    let mut cam = if live { actual } else { ctx.data(|d| d.get_temp::<ProjectionView>(pending_id)).unwrap_or(actual) };
+    let mut cam = ctx.data(|d| d.get_temp::<ProjectionView>(pending_id)).unwrap_or(actual);
 
     // The latlong map: where the view looks; click or drag to point it, the wheel zooms.
     ui.add_space(6.0);
@@ -101,7 +100,7 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         widgets::slider_row(ui, tl!("Field of View"), &mut cam.fov, 5.0..=150.0, "°", None);
     }
 
-    if !live && ctx.input(|i| i.pointer.any_down()) && cam != actual {
+    if ctx.input(|i| i.pointer.any_down()) && cam != actual {
         // Still dragging: keep the change pending.
         ctx.data_mut(|d| d.insert_temp(pending_id, cam));
     } else {
@@ -113,24 +112,6 @@ pub(crate) fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             v.clamp_latlong();
         }
     }
-
-    ui.add_space(6.0);
-    egui::CollapsingHeader::new(egui::RichText::new(tl!("Options")).size(11.5)).id_salt("spherical_options").default_open(false).show(ui, |ui| {
-        let mut live = live;
-        if widgets::checkbox(ui, &mut live, tl!("Live Update"))
-            .on_hover_text(tl!("Turn the main window while you drag; off, it turns when you release"))
-            .changed()
-        {
-            app.ui.tool_options.projection_live_update = live;
-        }
-        let mut doc_px = app.ui.tool_options.projection_brush_doc_px;
-        if widgets::checkbox(ui, &mut doc_px, tl!("Brush Size in Document Pixels"))
-            .on_hover_text(tl!("Measure the brush Size in latlong pixels at the view's centre instead of screen pixels"))
-            .changed()
-        {
-            app.ui.tool_options.projection_brush_doc_px = doc_px;
-        }
-    });
     shortcuts(app, ui, cam.latlong);
 }
 

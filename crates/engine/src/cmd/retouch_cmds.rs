@@ -35,7 +35,7 @@ pub use pattern_stamp::{
 };
 mod periodic;
 mod projected_clone;
-pub use projected_clone::projected_clone_preview;
+pub use projected_clone::{clone_job as projected_clone_job, projected_clone_preview};
 mod remove;
 pub use content_aware_move::{ContentAwarePreview, preview as content_aware_move_preview};
 pub use patch::preview as patch_preview;
