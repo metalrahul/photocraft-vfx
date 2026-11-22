@@ -266,9 +266,6 @@ pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<b
     let v = app.ui.views.get_mut(idx).ok_or("no document")?;
     let on = on.unwrap_or(v.projection.is_none());
     v.projection = if on { Some(ProjectionView { zoom: v.zoom, ..v.projection.unwrap_or_default() }) } else { None };
-    if on {
-        show_navigator(app);
-    }
     if on && !supported(app.ui.tool) {
         // Move, marquees, type…: start in the Hand tool so the view responds at once. The
         // toolbox and tool keys switch tools as usual.
@@ -1269,18 +1266,5 @@ mod tests {
         assert_eq!(v.fov, MIN_FOV as f32);
         v.scale_fov(1e6);
         assert_eq!(v.fov, MAX_FOV as f32);
-    }
-}
-
-/// Turning the projection on shows the Navigator (Window › Navigator), which outlines the view
-/// on the latlong: the default Essentials workspace hides it.
-fn show_navigator(app: &mut PhotocraftApp) {
-    if app.ui.docking.is_some() {
-        if let Some(Err(e)) = crate::panel_docking::command(app, "window.panel.navigator", &serde_json::json!({"show": true})) {
-            app.ui.status = e;
-        }
-    } else {
-        app.ui.panels.navigator = true;
-        app.ui.panels.dock = true;
     }
 }

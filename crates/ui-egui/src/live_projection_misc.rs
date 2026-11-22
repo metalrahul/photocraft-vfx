@@ -132,6 +132,7 @@ pub fn tool(
 
 /// The view's outline (its four edges through the projection) on the Navigator's latlong
 /// `rect`, as polylines split where they cross the seam.
+#[cfg(test)]
 pub(crate) fn frustum(app: &PhotocraftApp, idx: usize, rect: Rect) -> Vec<Vec<Pos2>> {
     let Some(cam) = app.ui.views.get(idx).and_then(|v| v.projection) else { return Vec::new() };
     frustum_of(app, idx, rect, &cam)
@@ -178,12 +179,10 @@ pub(crate) fn frustum_of(app: &PhotocraftApp, idx: usize, rect: Rect, cam: &Proj
     lines
 }
 
-/// A latlong map of the document in live projection (the Navigator, and the Spherical panel's
-/// map): draws the view's frustum. With `edit` (the Spherical panel, where every spherical
-/// control lives) a click or drag turns that camera to look at the point (the rotated latlong:
-/// that longitude, and that row at the middle), the wheel changes its zoom or field of view, and
-/// the frustum drawn is that camera's: the panel applies it to the view, live or on release.
-/// Returns false when the view is flat.
+/// The Spherical panel's latlong map of the document in live projection: a click or drag turns
+/// `cam` to look at the point (the rotated latlong: that longitude, and that row at the middle),
+/// the wheel changes its zoom or field of view, and `cam`'s frustum is drawn. The panel applies
+/// `cam` to the view, live or on release. Returns false when the view is flat.
 pub(crate) fn navigator(
     app: &PhotocraftApp,
     ui: &egui::Ui,
@@ -191,43 +190,38 @@ pub(crate) fn navigator(
     resp: &egui::Response,
     idx: usize,
     rect: Rect,
-    edit: Option<&mut ProjectionView>,
+    cam: &mut ProjectionView,
 ) -> bool {
     if !crate::live_projection::active(app, idx) {
         return false;
     }
     let (w, h) = doc_size(app, idx);
-    let lines = match edit {
-        Some(cam) => {
-            if (resp.clicked() || resp.dragged())
-                && let Some(pp) = resp.interact_pointer_pos()
-            {
-                let (fx, fy) = ((pp.x - rect.min.x) / rect.width().max(1.0), (pp.y - rect.min.y) / rect.height().max(1.0));
-                cam.yaw = (fx.clamp(0.0, 1.0) - 0.5) * 360.0;
-                if cam.latlong {
-                    cam.center_v = fy.clamp(0.0, 1.0) * h as f32;
-                } else {
-                    cam.pitch = (0.5 - fy.clamp(0.0, 1.0)) * 180.0;
-                }
-                cam.clamp();
-            }
-            if resp.hovered() {
-                let dy = ctx.input(|i| i.smooth_scroll_delta.y);
-                if dy != 0.0 {
-                    let c = app.last_canvas_rect;
-                    let ppp = app.canvas_ppp();
-                    let fit = (f64::from(c.width() * ppp) / w).min(f64::from(c.height() * ppp) / h);
-                    if cam.latlong {
-                        cam.zoom_latlong(f64::from((dy * 0.002).exp()), fit);
-                    } else {
-                        cam.scale_fov((-dy * 0.002).exp());
-                    }
-                }
-            }
-            frustum_of(app, idx, rect, cam)
+    if (resp.clicked() || resp.dragged())
+        && let Some(pp) = resp.interact_pointer_pos()
+    {
+        let (fx, fy) = ((pp.x - rect.min.x) / rect.width().max(1.0), (pp.y - rect.min.y) / rect.height().max(1.0));
+        cam.yaw = (fx.clamp(0.0, 1.0) - 0.5) * 360.0;
+        if cam.latlong {
+            cam.center_v = fy.clamp(0.0, 1.0) * h as f32;
+        } else {
+            cam.pitch = (0.5 - fy.clamp(0.0, 1.0)) * 180.0;
         }
-        None => frustum(app, idx, rect),
-    };
+        cam.clamp();
+    }
+    if resp.hovered() {
+        let dy = ctx.input(|i| i.smooth_scroll_delta.y);
+        if dy != 0.0 {
+            let c = app.last_canvas_rect;
+            let ppp = app.canvas_ppp();
+            let fit = (f64::from(c.width() * ppp) / w).min(f64::from(c.height() * ppp) / h);
+            if cam.latlong {
+                cam.zoom_latlong(f64::from((dy * 0.002).exp()), fit);
+            } else {
+                cam.scale_fov((-dy * 0.002).exp());
+            }
+        }
+    }
+    let lines = frustum_of(app, idx, rect, cam);
     let red = Stroke::new(1.5, Color32::from_rgb(255, 84, 84));
     for l in lines {
         ui.painter().add(egui::Shape::line(l, red));
