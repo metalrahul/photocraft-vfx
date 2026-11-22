@@ -407,6 +407,8 @@ fn paint_canvas(
     let gpu_ok = crate::gpu_canvas::gpu_view_ok(flip, view.rotation, aspect);
     // A Large Brush Mode overlay ends with its drag (Escape, a lost pointer, a document switch).
     strokes::sweep_gpu_stroke(app, ctx);
+    // A projection stroke written in the background lands once the projection is off.
+    crate::live_projection::finish_commit(app, false);
     if app.gpu.is_some() {
         if gpu_ok {
             crate::render_path::view_ok(app, doc.id.0);

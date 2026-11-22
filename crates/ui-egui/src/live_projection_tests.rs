@@ -84,6 +84,13 @@ fn click(h: &mut Harness<'_, PhotocraftApp>, at: egui::Pos2, button: PointerButt
     h.run_steps(1);
     h.event(Event::PointerButton { pos: at, button, pressed: false, modifiers: Modifiers::NONE });
     h.run_steps(3);
+    land(h);
+}
+
+/// Land a Brush or Eraser stroke still being written on its worker thread.
+fn land(h: &mut Harness<'_, PhotocraftApp>) {
+    crate::live_projection::finish_commit(h.state_mut(), true);
+    h.run_steps(1);
 }
 
 #[test]
@@ -143,6 +150,7 @@ fn drag(h: &mut Harness<'_, PhotocraftApp>, from: egui::Pos2, to: egui::Pos2, mo
     }
     h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers });
     h.run_steps(3);
+    land(h);
 }
 
 fn selected(h: &Harness<'_, PhotocraftApp>) -> bool {
@@ -1016,4 +1024,35 @@ fn float_display_for_large_documents_toggles_and_is_checked() {
     assert_eq!(crate::menus::invoke(h.state_mut(), &ctx, "view.floatDisplayLargeDocuments", json!({})).unwrap(), json!(false));
     h.run_steps(2);
     assert!(!h.state().ui.tool_options.float_display_large);
+}
+
+#[test]
+fn a_released_brush_stroke_is_written_in_the_background_and_lands_once() {
+    let mut h = ed_harness(Tool::Brush);
+    let c = h.state().last_canvas_rect.center();
+    let before = h.state().session.journal.len();
+    h.event(Event::PointerMoved(c));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    for i in 1..=6 {
+        h.event(Event::PointerMoved(c + vec2(i as f32 * 10.0, 0.0)));
+        h.run_steps(1);
+    }
+    h.event(Event::PointerButton { pos: c + vec2(60.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    // Written on a worker thread: it lands on a later frame (or here, waiting for it).
+    for _ in 0..200 {
+        if h.state().projection_commit.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run_steps(1);
+    }
+    land(&mut h);
+    assert!(h.state().projection_commit.is_none());
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    let strokes: Vec<_> = h.state().session.journal[before..].iter().filter(|(id, _)| id == "paint.projectedStroke").collect();
+    assert_eq!(strokes.len(), 1, "one stroke, landed once");
+    assert!(non_finite(&h) <= 8);
 }

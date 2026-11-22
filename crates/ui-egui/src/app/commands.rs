@@ -10,6 +10,8 @@ impl PhotocraftApp {
         let waited = self.perf.stage.wait_ms;
         if !crate::canvas::tool_state_only(id) {
             crate::canvas::finish_gpu_commit(self, true);
+            // And a projection stroke still being written (live_projection_commit.rs).
+            crate::live_projection::finish_commit(self, true);
         }
         if self.perf.stage.wait_ms > waited {
             crate::canvas::note_gpu_wait(self, waited, &format!("the command `{id}`"));

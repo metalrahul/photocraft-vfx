@@ -20,6 +20,10 @@ use crate::PhotocraftApp;
 use crate::state::{Tool, View};
 use photocraft_engine::equirect::{Camera, MAX_FOV, MAX_PITCH, MIN_FOV, Rot, ViewProjection, rot, rotation_between, wrap_deg};
 
+#[path = "live_projection_commit.rs"]
+mod commit;
+pub(crate) use commit::{Pending as PendingCommit, finish as finish_commit};
+
 /// Command id of the View menu toggle.
 pub const COMMAND: &str = "view.equirectLiveProjection";
 
@@ -263,6 +267,8 @@ pub(crate) fn look_keys(ctx: &egui::Context, cam: &mut ProjectionView) {
 
 /// Toggle the projection of document `idx`'s view; returns whether it is now on.
 pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<bool, String> {
+    // A stroke still being written lands in the view it was drawn in.
+    commit::finish(app, true);
     let v = app.ui.views.get_mut(idx).ok_or("no document")?;
     let on = on.unwrap_or(v.projection.is_none());
     v.projection = if on { Some(ProjectionView { zoom: v.zoom, ..v.projection.unwrap_or_default() }) } else { None };
@@ -457,6 +463,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             Color32::LIGHT_GRAY,
         );
     }
+    // A released stroke still being written: its preview, until it lands.
+    commit::show(app, &ctx, &painter, rect, ppp, cam.projection(vw, vh, doc_wh).key());
 
     // Painting: collect the stroke in view device pixels, commit it on release.
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
@@ -589,10 +597,15 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             l.draw(&ctx, &painter, rect, ppp);
             ctx.request_repaint();
         }
-        if let Some(mut l) = finished {
+        // A Brush or Eraser stroke is written on a worker thread (`live_projection_commit`):
+        // its preview stays until it lands. Other tools commit here.
+        let finished = finished.and_then(|mut l| {
             // Keep showing the stroke on the frame it is committed.
             l.draw(&ctx, &painter, rect, ppp);
             l.params["points"] = json!(l.points);
+            if l.cmd == "paint.projectedStroke" { commit::start(app, l, brush_scale, vp.key()).err() } else { Some(l) }
+        });
+        if let Some(l) = finished {
             let cmd = l.cmd;
             match with_brush_scale(app, brush_scale, |app| app.run(l.cmd, l.params)) {
                 Ok(v) => {

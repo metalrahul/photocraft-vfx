@@ -54,6 +54,13 @@ impl Session {
         Ok(())
     }
 
+    /// [`Self::offer_live_stroke`] for a `paint.projectedStroke` written on a worker thread
+    /// ([`brush_cmds::ProjectedStrokeJob`]): the command with the same params takes its pixels
+    /// when the document hasn't changed since the job was prepared.
+    pub fn offer_projected_stroke(&mut self, done: brush_cmds::ProjectedCommit) {
+        self.live_commit = Some(done.0);
+    }
+
     /// Withdraw an offer the command didn't take.
     pub fn clear_live_stroke(&mut self) {
         self.live_commit = None;

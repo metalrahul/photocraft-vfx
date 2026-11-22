@@ -350,6 +350,9 @@ pub fn paint_projected_stroke(s: &mut Session, p: &Value) -> Result<Value> {
     let label = if brush.erase { "Eraser" } else { "Brush Tool" };
     let bg = s.tools.background;
     let (id, brush, _) = stroke_target(s, p, brush)?;
+    // The stroke as the canvas already wrote it on a worker thread, for exactly these params
+    // and this document: take its pixels instead of writing it again (the pause at pen-up).
+    let live = s.live_commit.take().filter(|l| l.matches(s, "paint.projectedStroke", p, &pts));
     let dmg = s.edit(label, |doc, _| {
         let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
         let selection = doc.selection.clone();
@@ -357,28 +360,119 @@ pub fn paint_projected_stroke(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(EngineError::Other("document too small for a projected stroke".into()));
         }
         let (surf, lock) = crate::channel_cmds::target_surface(doc, id, p)?;
+        if let Some(l) = live {
+            *surf = l.surface;
+            return Ok(l.bounds);
+        }
         let mut brush = brush;
         erase_locked(&mut brush, lock, bg);
-        // The view-space area the stroke can reach: its points, padded by the brush.
-        let reach = (f64::from(brush.size) * 0.75 + 4.0).ceil();
-        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-        for q in &pts {
-            (x0, y0, x1, y1) = (x0.min(q.x), y0.min(q.y), x1.max(q.x), y1.max(q.y));
-        }
-        let work = Rect::new((x0 - reach).floor() as i32, (y0 - reach).floor() as i32, (x1 + reach).ceil() as i32, (y1 + reach).ceil() as i32)
-            .intersect(&Rect::new(0, 0, proj.w as i32, proj.h as i32));
-        if work.is_empty() {
-            return Ok(Rect::EMPTY);
-        }
-        let pre = to_view(surf, &proj, work, iw, ih);
-        let mut post = pre.clone();
-        let damage = photocraft_paint::render_stroke(&mut post, &brush, &pts, None, lock, 1.0).intersect(&work);
-        if damage.is_empty() {
-            return Ok(Rect::EMPTY);
-        }
-        Ok(write_back(surf, &proj, &pre, &post, damage, iw, ih, selection.as_ref()))
+        Ok(project_stroke(surf, &proj, &pts, &brush, lock, selection.as_ref(), iw, ih))
     })?;
     Ok(damage_json(s, dmg))
+}
+
+/// Render `pts` (view pixels) with `brush` in view `proj` and write the change back into the
+/// equirect `surf` (`iw` × `ih`), clipped by the equirect `selection`. Returns the equirect damage.
+#[allow(clippy::too_many_arguments)]
+fn project_stroke(
+    surf: &mut Surface,
+    proj: &ViewProjection,
+    pts: &[photocraft_paint::StrokePoint],
+    brush: &photocraft_paint::BrushSettings,
+    lock: bool,
+    selection: Option<&Surface>,
+    iw: i32,
+    ih: i32,
+) -> Rect {
+    // The view-space area the stroke can reach: its points, padded by the brush.
+    let reach = (f64::from(brush.size) * 0.75 + 4.0).ceil();
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for q in pts {
+        (x0, y0, x1, y1) = (x0.min(q.x), y0.min(q.y), x1.max(q.x), y1.max(q.y));
+    }
+    let work = Rect::new((x0 - reach).floor() as i32, (y0 - reach).floor() as i32, (x1 + reach).ceil() as i32, (y1 + reach).ceil() as i32)
+        .intersect(&Rect::new(0, 0, proj.w as i32, proj.h as i32));
+    if work.is_empty() {
+        return Rect::EMPTY;
+    }
+    let pre = to_view(surf, proj, work, iw, ih);
+    let mut post = pre.clone();
+    let damage = photocraft_paint::render_stroke(&mut post, brush, pts, None, lock, 1.0).intersect(&work);
+    if damage.is_empty() {
+        return Rect::EMPTY;
+    }
+    write_back(surf, proj, &pre, &post, damage, iw, ih, selection)
+}
+
+/// A released `paint.projectedStroke`, ready to be written on a worker thread
+/// ([`ProjectedStrokeJob::run`]) while the canvas carries on: the brush, the target's pixels and
+/// the selection as they were when it was prepared. Its result is offered to the command
+/// ([`Session::offer_projected_stroke`]), which takes it when nothing changed meanwhile.
+pub struct ProjectedStrokeJob {
+    commit: super::LiveCommit,
+    proj: ViewProjection,
+    brush: photocraft_paint::BrushSettings,
+    lock: bool,
+    selection: Option<Surface>,
+    size: (i32, i32),
+}
+
+/// A finished [`ProjectedStrokeJob`]: the target's new pixels.
+pub struct ProjectedCommit(pub(crate) super::LiveCommit);
+
+impl ProjectedCommit {
+    /// The target's pixels with the stroke written.
+    pub fn surface(&self) -> &Surface {
+        &self.0.surface
+    }
+}
+
+impl ProjectedStrokeJob {
+    /// Prepare the stroke `p` (`paint.projectedStroke` params with its points) on the active
+    /// document. Cheap: the pixels are shared until the job writes.
+    pub fn prepare(s: &Session, p: &Value) -> Result<Self> {
+        let proj = projection(p)?;
+        let points = parse_points(p, "paint.projectedStroke")?;
+        if points.is_empty() {
+            return Err(bad("paint.projectedStroke", "no points"));
+        }
+        let brush = with_blend_mode(resolve_brush(s, p, "paint.projectedStroke")?, p);
+        let bg = s.tools.background;
+        let (id, mut brush, _) = stroke_target(s, p, brush)?;
+        let st = s.active().ok_or(EngineError::NoDocument)?;
+        let base = (st.doc.id, st.revision);
+        let base_doc = std::sync::Arc::downgrade(&st.doc);
+        let mut doc = (*st.doc).clone();
+        let size = (doc.size.width as i32, doc.size.height as i32);
+        if size.0 < 2 || size.1 < 1 {
+            return Err(EngineError::Other("document too small for a projected stroke".into()));
+        }
+        let selection = doc.selection.clone();
+        let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
+        erase_locked(&mut brush, lock, bg);
+        let commit = super::LiveCommit {
+            mixer: None,
+            cmd: "paint.projectedStroke".into(),
+            base,
+            base_doc,
+            params: p.clone(),
+            seed: p.get("seed").and_then(Value::as_u64),
+            points,
+            surface: surf.clone(),
+            bounds: Rect::EMPTY,
+        };
+        Ok(Self { commit, proj, brush, lock, selection, size })
+    }
+
+    /// Write the stroke (the heavy part: any thread). Also returns the pixels before it and the
+    /// changed rectangle, for the caller to prepare its upload.
+    pub fn run(self) -> (ProjectedCommit, Surface, Rect) {
+        let Self { mut commit, proj, brush, lock, selection, size } = self;
+        let before = commit.surface.clone();
+        commit.bounds = project_stroke(&mut commit.surface, &proj, &commit.points, &brush, lock, selection.as_ref(), size.0, size.1);
+        let bounds = commit.bounds;
+        (ProjectedCommit(commit), before, bounds)
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +502,62 @@ mod tests {
         assert_eq!(rgba(&s, 180, 180)[3], 0.0, "the opposite side is untouched");
         s.execute("edit.undo", json!({})).unwrap();
         assert_eq!(rgba(&s, 540, 180)[3], 0.0, "undone");
+    }
+
+    fn red_dab(x: f64) -> Value {
+        json!({
+            "points": [[x, 150], [x + 40.0, 160]],
+            "size": 30, "hardness": 0.8, "color": "#ff0000",
+            "projection": {"kind": "latlong", "yaw": 30.0, "docWidth": 720, "docHeight": 360, "width": 400, "height": 300}
+        })
+    }
+
+    /// The document pixel under view point (x, y) of `red_dab`'s view.
+    fn under(x: f64, y: f64) -> (i32, i32) {
+        let q = &red_dab(0.0)["projection"];
+        let [u, v] = ViewProjection::from_json(q, 400.0, 300.0).view_to_equirect(x, y, 720.0, 360.0);
+        (u as i32, v as i32)
+    }
+
+    #[test]
+    fn a_stroke_written_on_a_worker_thread_lands_as_the_command_would_paint_it() {
+        let new = || {
+            let mut s = Session::new();
+            s.execute("file.new", json!({"width": 720, "height": 360, "background": "transparent"})).unwrap();
+            s
+        };
+        let mut direct = new();
+        direct.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
+        let mut s = new();
+        let job = ProjectedStrokeJob::prepare(&s, &red_dab(150.0)).unwrap();
+        let (done, _, bounds) = std::thread::spawn(move || job.run()).join().unwrap();
+        assert!(!bounds.is_empty());
+        s.offer_projected_stroke(done);
+        s.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
+        assert!(s.live_commit.is_none(), "the offer is used up");
+        let hit = under(170.0, 155.0);
+        assert!(rgba(&s, hit.0, hit.1)[3] > 0.5, "painted at {hit:?}");
+        for (x, y) in [(0, 0), hit, (hit.0 + 12, hit.1 + 6), (hit.0 + 300, hit.1)] {
+            assert_eq!(rgba(&s, x, y), rgba(&direct, x, y), "({x}, {y})");
+        }
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(rgba(&s, hit.0, hit.1)[3], 0.0, "one History step");
+    }
+
+    #[test]
+    fn a_worker_stroke_prepared_before_another_edit_is_painted_again() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 720, "height": 360, "background": "transparent"})).unwrap();
+        let job = ProjectedStrokeJob::prepare(&s, &red_dab(150.0)).unwrap();
+        // Another stroke lands first: the job's pixels lack it and must not be taken.
+        s.execute("paint.projectedStroke", red_dab(300.0)).unwrap();
+        let (other, mine) = (under(320.0, 155.0), under(170.0, 155.0));
+        let second = rgba(&s, other.0, other.1);
+        assert!(second[3] > 0.5, "{second:?}");
+        s.offer_projected_stroke(job.run().0);
+        s.execute("paint.projectedStroke", red_dab(150.0)).unwrap();
+        assert_eq!(rgba(&s, other.0, other.1), second, "the other stroke is kept");
+        assert!(rgba(&s, mine.0, mine.1)[3] > 0.5);
     }
 
     #[test]

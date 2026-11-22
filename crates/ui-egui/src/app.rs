@@ -59,6 +59,7 @@ impl PhotocraftApp {
             move_blocked: false,
             tool_override: None,
             projection_live: None,
+            projection_commit: None,
             projection_select: None,
             projection_ants: None,
             projection_xform: None,

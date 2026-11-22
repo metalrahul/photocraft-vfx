@@ -398,6 +398,8 @@ pub struct PhotocraftApp {
     pub(crate) tool_override: Option<state::Tool>,
     /// The Equirectangular Live Projection stroke being drawn and its preview (live_projection.rs).
     pub(crate) projection_live: Option<live_projection::Live>,
+    /// A released projection stroke being written on a worker thread (live_projection_commit.rs).
+    pub(crate) projection_commit: Option<live_projection::PendingCommit>,
     /// A selection shape being drawn in a projection view, and the projected marching ants.
     pub(crate) projection_select: Option<live_projection_select::SelDrag>,
     pub(crate) projection_ants: Option<live_projection_select::Ants>,
