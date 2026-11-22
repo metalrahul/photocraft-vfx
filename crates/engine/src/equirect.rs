@@ -89,7 +89,9 @@ enum Mode {
     /// A rotated latlong: the panorama drawn `pw` × `ph` view pixels with its top-left at
     /// (`ox`, `oy`), looking along `rot` (see [`latlong_rotation`]). `src` keeps what it was made
     /// from (yaw, pitch, roll, scale, centre row, document width and height) for [`ViewProjection::to_json`].
-    Latlong { rot: Rot, ox: f64, oy: f64, pw: f64, ph: f64, src: [f64; 7] },
+    /// `shift`: turned only by yaw (`yaw / 360`), the case mapped by a plain shift
+    /// ([`ViewProjection::flat`]); `None` otherwise, including once [`ViewProjection::rotated`].
+    Latlong { rot: Rot, ox: f64, oy: f64, pw: f64, ph: f64, src: [f64; 7], shift: Option<f64> },
 }
 
 /// A camera looking through a `w` × `h` pixel view (the view's centre is the optical axis), or
@@ -130,7 +132,15 @@ impl ViewProjection {
         let rot = latlong_rotation(yaw, pitch, roll);
         let (pw, ph) = (iw * scale, ih * scale);
         let cam = Camera { yaw, pitch, fov: 90.0 }.normalized();
-        let mode = Mode::Latlong { rot, ox: w / 2.0 - pw / 2.0, oy: h / 2.0 - center_v * scale, pw, ph, src: [yaw, pitch, roll, scale, center_v, iw, ih] };
+        let mode = Mode::Latlong {
+            rot,
+            ox: w / 2.0 - pw / 2.0,
+            oy: h / 2.0 - center_v * scale,
+            pw,
+            ph,
+            src: [yaw, pitch, roll, scale, center_v, iw, ih],
+            shift: (pitch == 0.0 && roll == 0.0).then_some(yaw / 360.0),
+        };
         ViewProjection { cam, w, h, basis: rolled_basis(yaw, pitch, roll), k: 1.0, mode }
     }
 
@@ -257,7 +267,9 @@ impl ViewProjection {
     /// the hot paths (a stroke's write-back on a 16K plate) skip the trigonometry.
     fn flat(&self) -> Option<[f64; 5]> {
         match self.mode {
-            Mode::Latlong { ox, oy, pw, ph, src: [yaw, pitch, roll, ..], .. } if pitch == 0.0 && roll == 0.0 => Some([ox, oy, pw, ph, yaw / 360.0]),
+            // Not `src`: a view `rotated` for the Clone Stamp's source keeps the `src` it was
+            // made from, but no longer maps by the shift.
+            Mode::Latlong { ox, oy, pw, ph, shift: Some(shift), .. } => Some([ox, oy, pw, ph, shift]),
             _ => None,
         }
     }
@@ -270,7 +282,7 @@ impl ViewProjection {
     pub fn rotated(&self, q: &Rot) -> ViewProjection {
         let [f, r, u] = self.basis;
         let mode = match self.mode {
-            Mode::Latlong { rot: m, ox, oy, pw, ph, src } => Mode::Latlong { rot: mul(q, &m), ox, oy, pw, ph, src },
+            Mode::Latlong { rot: m, ox, oy, pw, ph, src, .. } => Mode::Latlong { rot: mul(q, &m), ox, oy, pw, ph, src, shift: None },
             Mode::Perspective => Mode::Perspective,
         };
         ViewProjection { basis: [rot(q, f), rot(q, r), rot(q, u)], mode, ..*self }
@@ -614,6 +626,18 @@ mod tests {
             assert!(cols < 1000, "{rects:?}");
         }
         assert!(ViewProjection::latlong(10.0, 5.0, 0.0, 100.0, 100.0, 200.0, 100.0, 0.0, 50.0).flat().is_none());
+        // The Clone Stamp's source view: a yaw-only view turned by the source rotation samples
+        // through that rotation, not the shift (the clone painted its own pixels back).
+        let p = ViewProjection::latlong(20.0, 0.0, 0.0, 1600.0, 900.0, iw, ih, 0.1, 4096.0);
+        let q = rotation_between(p.view_to_dir(800.0, 450.0), p.view_to_dir(600.0, 300.0));
+        let r = p.rotated(&q);
+        assert!(r.flat().is_none());
+        let got = r.view_to_equirect(800.0, 450.0, iw, ih);
+        let want = dir_to_equirect(rot(&q, p.view_to_dir(800.0, 450.0)), iw, ih);
+        let du = (got[0] - want[0]).abs();
+        assert!(du.min(iw - du) < 1e-6 && close(got[1], want[1], 1e-6), "{got:?} vs {want:?}");
+        let src = p.view_to_equirect(600.0, 300.0, iw, ih);
+        assert!((got[0] - src[0]).abs() < 1e-3 && (got[1] - src[1]).abs() < 1e-3, "{got:?} vs {src:?}");
     }
 
     #[test]
