@@ -468,7 +468,7 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool, 
 /// the barrel presses (one let go before the next frame included) and wakes the UI on each, so
 /// a press with the pen hovering still opens the picker. A tip tap with the button held (it is
 /// already let go when the tap's release frame runs) is read from the press frame.
-fn barrel_clicks(app: &PhotocraftApp, response: &Response, physical_right: bool) -> (bool, bool, bool) {
+pub(crate) fn barrel_clicks(app: &PhotocraftApp, response: &Response, physical_right: bool) -> (bool, bool, bool) {
     let presses = app.services.barrel_presses.as_ref().map(|f| f());
     let seen_id = egui::Id::unique("pc_barrel_presses_seen");
     let seen = response.ctx.data(|d| d.get_temp::<u32>(seen_id));

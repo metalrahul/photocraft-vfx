@@ -31,7 +31,7 @@ fn projection(p: &Value) -> Result<ViewProjection> {
 
 /// Bilinear sample of `s` at pixel-centre position (x, y) (pixel i's centre is i + 0.5), wrapping
 /// x around `w` and clamping y to the image rows.
-fn sample_wrapped(s: &Surface, x: f64, y: f64, w: i32, h: i32, out: &mut [f32], tmp: &mut [f32]) {
+pub(crate) fn sample_wrapped(s: &Surface, x: f64, y: f64, w: i32, h: i32, out: &mut [f32], tmp: &mut [f32]) {
     let (fx, fy) = (x - 0.5, y - 0.5);
     let (x0, y0) = (fx.floor(), fy.floor());
     let (tx, ty) = ((fx - x0) as f32, (fy - y0) as f32);
@@ -52,7 +52,7 @@ fn sample_wrapped(s: &Surface, x: f64, y: f64, w: i32, h: i32, out: &mut [f32], 
 
 /// Bilinear sample of a row-major `n`-channel buffer covering `r`, at a pixel-centre position;
 /// edges clamp.
-fn sample_buf(buf: &[f32], r: Rect, n: usize, x: f64, y: f64, out: &mut [f32]) {
+pub(crate) fn sample_buf(buf: &[f32], r: Rect, n: usize, x: f64, y: f64, out: &mut [f32]) {
     let (w, h) = (r.width() as i64, r.height() as i64);
     let (fx, fy) = (x - 0.5 - f64::from(r.x0), y - 0.5 - f64::from(r.y0));
     let (x0, y0) = (fx.floor(), fy.floor());

@@ -12,7 +12,7 @@ use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
 use super::{SampleLayers, bad, blend_param, composite_region, damage_json, parse_brush, run_stroke, sample_layers};
-use crate::brush_cmds::projected::{to_view, write_back};
+use crate::brush_cmds::projected::to_view;
 use crate::equirect::{ViewProjection, rot_from_slice, view_rect_to_equirect};
 use crate::{Result, Session};
 
@@ -76,46 +76,86 @@ pub fn clone_job(s: &Session, p: &Value) -> Result<crate::brush_cmds::ProjectedS
 }
 
 /// Clone stroke `c` onto `surf` (the target in document `pre`), clipped by `sel`.
+///
+/// Written per document pixel at full size: each pixel under the stroke takes the stroke's
+/// coverage at its view position and the source pixel its direction turns to. (Adding the
+/// view-space change back, as the Brush does, kept the high-frequency detail of what was there
+/// whenever the view showed the panorama smaller than its pixels: the old content ghosted
+/// through the clone as speckle.)
 fn clone_into(c: &Parsed, pre: &photocraft_doc::Document, surf: &mut Surface, sel: Option<&Surface>, lock: bool) -> Result<Rect> {
+    use crate::brush_cmds::projected::{sample_buf, sample_wrapped};
+    use rayon::prelude::*;
     let Parsed { proj, src_proj, stroke, id, which, mode } = c;
     let (proj, src_proj, which, id, mode) = (*proj, *src_proj, *which, *id, *mode);
-    let (w, h) = (proj.w, proj.h);
     let (iw, ih) = (pre.size.width as i32, pre.size.height as i32);
     if iw < 2 || ih < 1 {
         return Err(bad(CMD, "document too small for a projected stroke"));
     }
     let (bounds, cov) = stroke_coverage(stroke);
-    let view = Rect::new(0, 0, w as i32, h as i32);
+    let view = Rect::new(0, 0, proj.w as i32, proj.h as i32);
     let work = bounds.intersect(&view);
     if work.is_empty() {
         return Ok(Rect::EMPTY);
     }
     // Coverage only over the part of the stroke inside the view.
     let cov = crop(&cov, bounds, work);
-    let pre_view = to_view(surf, &proj, work, iw, ih);
+    let n = surf.channels();
+    let fmt = surf.format();
+    let r = [f64::from(work.x0), f64::from(work.y0), f64::from(work.x1), f64::from(work.y1)];
+    // What the clone reads, at full size: the target before the stroke, or the composite of
+    // the sampled layers where the rotated view looks.
     let source = match which {
-        SampleLayers::Current => to_view(surf, &src_proj, work, iw, ih),
+        SampleLayers::Current => surf.clone(),
         _ => {
-            // The composite only where the rotated view looks.
-            let fmt = surf.format();
             let mut flat = Surface::new(fmt);
-            let r = [f64::from(work.x0), f64::from(work.y0), f64::from(work.x1), f64::from(work.y1)];
             for e in view_rect_to_equirect(&src_proj, r, iw as u32, ih as u32, 2.0) {
                 let rect = Rect::new(e[0] as i32, e[1] as i32, e[2] as i32, e[3] as i32);
                 if !rect.is_empty() {
                     flat.write_region(rect, &composite_region(pre, id, which, rect, fmt).data);
                 }
             }
-            to_view(&flat, &src_proj, work, iw, ih)
+            flat
         }
     };
-    let paint = Region::read(&source, work);
-    let mut post = pre_view.clone();
-    let damage = apply_coverage(&mut post, work, &cov, stroke.brush.opacity, None, lock, &paint, mode).intersect(&work);
-    if damage.is_empty() {
-        return Ok(Rect::EMPTY);
+    let (fw, fh) = (f64::from(iw), f64::from(ih));
+    let mut total = Rect::EMPTY;
+    for e in view_rect_to_equirect(&proj, r, iw as u32, ih as u32, 1.0) {
+        let rect = Rect::new(e[0] as i32, e[1] as i32, e[2] as i32, e[3] as i32);
+        if rect.is_empty() {
+            continue;
+        }
+        let w = rect.width() as usize;
+        let mut cov_doc = vec![0f32; w * rect.height() as usize];
+        let mut paint = Region::new(rect, n);
+        // Rows in parallel: the coverage under each pixel and the source pixel it clones.
+        cov_doc.par_chunks_mut(w).zip(paint.data.par_chunks_mut(w * n)).enumerate().for_each(|(j, (crow, prow))| {
+            let y = f64::from(rect.y0 + j as i32) + 0.5;
+            let (mut px, mut tmp, mut k) = (vec![0f32; n], vec![0f32; n], [0f32]);
+            for (i, cv) in crow.iter_mut().enumerate() {
+                let x = f64::from(rect.x0 + i as i32) + 0.5;
+                let Some([vx, vy]) = proj.equirect_to_view(x, y, fw, fh) else { continue };
+                if !(vx >= r[0] && vx < r[2] && vy >= r[1] && vy < r[3]) {
+                    continue;
+                }
+                sample_buf(&cov, work, 1, vx, vy, &mut k);
+                if k[0] <= 0.0 {
+                    continue;
+                }
+                *cv = k[0];
+                let [u, v] = src_proj.view_to_equirect(vx, vy, fw, fh);
+                sample_wrapped(&source, u, v, iw, ih, &mut px, &mut tmp);
+                if let Some(out) = prow.get_mut(i * n..(i + 1) * n) {
+                    out.copy_from_slice(&px);
+                }
+            }
+        });
+        if cov_doc.iter().all(|c| *c <= 0.0) {
+            continue;
+        }
+        let d = apply_coverage(surf, rect, &cov_doc, stroke.brush.opacity, sel, lock, &paint, mode);
+        total = if total.is_empty() { d } else { total.union(&d) };
     }
-    Ok(write_back(surf, &proj, &pre_view, &post, damage, iw, ih, sel))
+    Ok(total)
 }
 
 /// A live Clone Stamp preview from `paint.projectedClone` params (points unused): the target
@@ -257,6 +297,42 @@ mod tests {
         // One History step.
         s.execute("edit.undo", json!({})).unwrap();
         assert_eq!(rgba(&s, 1, 180)[3], 0.0);
+    }
+
+    #[test]
+    fn a_clone_in_a_zoomed_out_view_leaves_none_of_what_was_there() {
+        // A one-pixel checker everywhere but a red source square, seen at a quarter size.
+        let mut s = doc();
+        let id = s.active().unwrap().active_layer.unwrap();
+        s.edit("checker", |doc, _| {
+            let surf = doc.layer_mut(id).unwrap().surface_mut().unwrap();
+            let mut d = vec![0f32; 720 * 360 * 4];
+            for y in 0..360 {
+                for x in 0..720 {
+                    let px = if (330..390).contains(&x) && (150..210).contains(&y) {
+                        [1.0, 0.0, 0.0, 1.0]
+                    } else if (x + y) % 2 == 0 {
+                        [0.0, 0.0, 0.0, 1.0]
+                    } else {
+                        [1.0, 1.0, 1.0, 1.0]
+                    };
+                    d[(y * 720 + x) * 4..][..4].copy_from_slice(&px);
+                }
+            }
+            surf.write_region(Rect::new(0, 0, 720, 360), &d);
+            Ok(())
+        })
+        .unwrap();
+        let p = ViewProjection::latlong(0.0, 0.0, 0.0, 180.0, 90.0, 720.0, 360.0, 0.25, 180.0);
+        // Clone the red square (view 90, 45) onto the checker 30° to the right (view 105, 45).
+        let q = rotation_between(p.view_to_dir(105.0, 45.0), p.view_to_dir(90.0, 45.0));
+        let view = json!({"kind": "latlong", "yaw": 0.0, "scale": 0.25, "centerY": 180.0, "docWidth": 720, "docHeight": 360, "width": 180, "height": 90});
+        s.execute(CMD, json!({"points": [[105.0, 45.0]], "size": 10, "hardness": 100, "rotation": q.concat(), "projection": view})).unwrap();
+        // The middle of the clone (doc 420, 180) is the source's red, checker gone.
+        for (x, y) in [(420, 180), (421, 180), (420, 181), (415, 176)] {
+            let c = rgba(&s, x, y);
+            assert!(c[0] > 0.99 && c[1] < 0.01 && c[2] < 0.01, "({x}, {y}): {c:?}");
+        }
     }
 
     #[test]

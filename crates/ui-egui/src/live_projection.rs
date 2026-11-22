@@ -173,10 +173,27 @@ pub(crate) fn brush_scale(app: &PhotocraftApp, cam: &ProjectionView, vp: &ViewPr
 /// Ctrl+Alt+drag. Sideways sets the size, up and down the hardness (or the opacity, with "Vary
 /// Round Brush Hardness on HUD" off); the circle stays where the drag began. `z` is screen points
 /// per brush-Size unit. True while a resize is in progress (the tool then doesn't paint).
-fn brush_resize(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, tool: Tool, z: f32) -> bool {
+fn brush_resize(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    tool: Tool,
+    z: f32,
+    physical_right: bool,
+) -> bool {
     type Rz = (f32, f32, egui::Pos2, bool, u64);
     let id = egui::Id::new("projection_brush_resize");
     let (mods, sec_down, prim_down) = ctx.input(|i| (i.modifiers, i.pointer.button_down(PointerButton::Secondary), i.pointer.primary_down()));
+    // Alt held, sticky (a modifier the pen's express keys or the on-screen keys hold) included.
+    let mods = crate::workspace_ui::sticky_mods(app, mods);
+    // The pen's side button counts as the right button (`physical_right`); its press is the
+    // frame it goes down, or the drag it starts with the tip down.
+    let was_id = egui::Id::new("projection_brush_resize_side_was");
+    let was = ctx.data(|d| d.get_temp::<bool>(was_id)).unwrap_or(false);
+    ctx.data_mut(|d| d.insert_temp(was_id, physical_right));
+    let side_pressed = physical_right && (!was || response.drag_started());
+    let sec_down = sec_down || physical_right;
     let mut rz: Option<Rz> = ctx.data(|d| d.get_temp(id));
     if let Some(r) = rz
         && !(if r.3 { sec_down } else { prim_down })
@@ -186,10 +203,10 @@ fn brush_resize(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::R
     }
     if rz.is_none() && crate::brush_resize::applies(tool) && response.hovered() {
         let (sec, prim) = ctx.input(|i| (i.pointer.button_pressed(PointerButton::Secondary), i.pointer.button_pressed(PointerButton::Primary)));
-        let sec = sec && crate::brush_resize::is_right_gesture(mods);
-        let prim = prim && crate::brush_resize::is_gesture(mods);
+        let sec = (sec || side_pressed) && crate::brush_resize::is_right_gesture(mods);
+        let prim = prim && !physical_right && crate::brush_resize::is_gesture(mods);
         if (sec || prim)
-            && let Some(p) = ctx.input(|i| i.pointer.interact_pos())
+            && let Some(p) = ctx.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()))
         {
             let vary = app.session.prefs().tools.vary_round_brush_hardness_on_hud;
             let b = &app.session.tools.brush;
@@ -477,7 +494,10 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     let alt = ctx.input(|i| i.modifiers.alt);
     // Free Transform's handles take the pointer while it is up, whatever the tool.
     let transforming = crate::live_projection_xform::transform(app, &ctx, &response, &painter, rect, ppp, idx);
-    let resizing = !transforming && !looking && brush_resize(app, &ctx, &response, &painter, tool, brush_scale / ppp);
+    // A pen's side button: Windows reports it as no right button (winit makes the pen touches),
+    // so it is read from the tablet hook, as the flat canvas does (`paint_mouse::canvas_buttons`).
+    let physical_right = app.services.right_button_down.as_ref().is_some_and(|f| f());
+    let resizing = !transforming && !looking && brush_resize(app, &ctx, &response, &painter, tool, brush_scale / ppp, physical_right);
     if transforming || resizing {
     } else if paints && cloning && alt {
         // ⌥/Alt-click (or press) sets the source: a direction, so looking around keeps it.
@@ -496,10 +516,13 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         }
     } else if paints {
         let pressure = f64::from(app.stylus.pressure());
-        // Right-click: the Brush Preset picker, as on the flat canvas (Alt+right-drag resizes).
-        if response.secondary_clicked()
+        // Right-click, or the pen's side button: the Brush Preset picker, as on the flat canvas
+        // (Alt with either resizes). A press made with the side button never paints.
+        let (barrel_hover_press, barrel_tip_click, barrel_contact) = crate::paint_mouse::barrel_clicks(app, &response, physical_right);
+        let barrel_click = (barrel_hover_press || (barrel_tip_click && app.ui.brush_picker.is_none())) && !alt;
+        if (response.secondary_clicked() || barrel_click)
             && !alt
-            && let Some(p) = response.interact_pointer_pos()
+            && let Some(p) = response.interact_pointer_pos().or_else(|| response.hover_pos())
         {
             crate::brush_picker::open(&mut app.ui, &ctx, [p.x, p.y]);
         }
@@ -573,6 +596,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             }
         };
         if response.drag_started_by(PointerButton::Primary)
+            && !barrel_contact
             && let Some(p) = response.interact_pointer_pos()
         {
             let [x, y] = to_view(p);
@@ -589,6 +613,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         let finished: Option<Live> = if response.drag_stopped_by(PointerButton::Primary) {
             app.projection_live.take().filter(|l| l.doc == idx)
         } else if response.clicked()
+            && !barrel_tip_click
+            && !barrel_contact
             && let Some(p) = response.interact_pointer_pos()
         {
             let [x, y] = to_view(p);
